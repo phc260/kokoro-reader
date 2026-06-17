@@ -51,15 +51,6 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
-      # Puts the latest Windows SDK rc.exe on PATH (via $GITHUB_ENV, so it carries
-      # into the tauri-action build step) for the x64 app build. Without it
-      # tauri-winres picks up a stale RC.EXE that can't compile our PNG-encoded
-      # icon.ico (RC2175 "not in 3.00 format").
-      - name: Set up MSVC dev environment (modern rc.exe)
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: amd64
-
       # Runs beforeBuildCommand (bun run build -> tsc + vite), bundles the
       # NSIS/MSI installers (embedding controls.ini + KokoroSapi.dll), then
       # uploads them to a draft GitHub Release. On a tag push the release uses
