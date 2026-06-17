@@ -16,11 +16,6 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
-# Generate Rust types from proto/onnx.proto at build time so the backend can
-# patch the downloaded Kokoro ONNX for the DirectML EP (see onnx_patch.rs).
-# protoc-bin-vendored supplies a protoc binary so no system install is needed.
-prost-build = "0.13"
-protoc-bin-vendored = "3"
 
 [dependencies]
 tauri = { version = "2", features = [] }
@@ -35,7 +30,10 @@ futures-util = "0.3"
 serde_json = "1"
 sha2 = "0.10"
 tauri-plugin-opener = "2.5.4"
-# Decode/encode the Kokoro ONNX (protobuf) to patch ConvTranspose nodes for the
-# DirectML EP. Types are generated from proto/onnx.proto (see build.rs).
-prost = "0.13"
+# Named-pipe server bridging the SAPI engine (Kindle) to webview WebGPU synthesis.
+tokio = { version = "1", features = ["net", "io-util", "rt", "sync", "time", "macros"] }
+
+# Read the SAPI voice token's AssetDir from the registry to write controls.ini.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
 

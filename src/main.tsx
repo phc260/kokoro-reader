@@ -4,6 +4,10 @@ import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import App from "./App";
 import Setup from "./Setup";
+import { startSapiBridge } from "./bridge";
+
+// Serve Kindle's SAPI synth requests via WebGPU for the lifetime of the app.
+startSapiBridge();
 
 // Gates the "/" route: the TTS model must be present before the reader renders.
 // Until then we redirect to the setup wizard, which navigates back here once

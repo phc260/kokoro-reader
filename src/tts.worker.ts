@@ -53,7 +53,7 @@ type OutMsg =
   | { type: "error"; id: number; message: string };
 
 type InMsg =
-  | { type: "speak"; id: number; text: string; voice: string }
+  | { type: "speak"; id: number; text: string; voice: string; speed: number }
   | { type: "stop" };
 
 // Most-recent request id. A newer "speak" or a "stop" supersedes any in-flight
@@ -137,13 +137,14 @@ async function synthesize(
   id: number,
   text: string,
   voice: string,
+  speed: number,
 ): Promise<{ audio: Float32Array; samplingRate: number }> {
   const chunks: Float32Array[] = [];
   let samplingRate = 24000;
   const splitter = new TextSplitterStream();
   splitter.push(text);
   splitter.close();
-  for await (const chunk of model.stream(splitter, { voice: voice as VoiceId })) {
+  for await (const chunk of model.stream(splitter, { voice: voice as VoiceId, speed })) {
     if (latestId !== id) break; // superseded by a newer request or stop
     chunks.push(chunk.audio.audio);
     samplingRate = chunk.audio.sampling_rate;
@@ -158,13 +159,13 @@ async function synthesize(
   return { audio, samplingRate };
 }
 
-async function handleSpeak(id: number, text: string, voice: string) {
+async function handleSpeak(id: number, text: string, voice: string, speed: number) {
   try {
     // getModel() resolves only once a backend has warmed up successfully, so by
     // here the backend is known-good — no per-request fallback needed.
     const model = await getModel();
-    console.log(`[tts] synthesizing (${backend}, ${voice}):`, text.slice(0, 40));
-    const { audio, samplingRate } = await synthesize(model, id, text, voice);
+    console.log(`[tts] synthesizing (${backend}, ${voice}, ${speed}x):`, text.slice(0, 40));
+    const { audio, samplingRate } = await synthesize(model, id, text, voice, speed);
     if (latestId !== id) return; // stopped while synthesizing
     post({ type: "audio", id, audio, samplingRate }, [audio.buffer]);
   } catch (err) {
@@ -189,6 +190,6 @@ self.addEventListener("message", (event: MessageEvent<InMsg>) => {
   }
   if (msg.type === "speak") {
     latestId = msg.id;
-    void handleSpeak(msg.id, msg.text, msg.voice);
+    void handleSpeak(msg.id, msg.text, msg.voice, msg.speed);
   }
 });

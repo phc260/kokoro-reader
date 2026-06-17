@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Core + opener permissions for the reader window. core:default includes event listen/emit, used by the SAPI bridge and the download-progress UI.",
+  "windows": ["main"],
+  "permissions": ["core:default", "opener:default"]
+}

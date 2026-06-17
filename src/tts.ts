@@ -9,9 +9,12 @@ type WorkerOut =
   | { type: "audio"; id: number; audio: Float32Array; samplingRate: number }
   | { type: "error"; id: number; message: string };
 
+/** Raw synthesized audio: mono Float32 PCM and its sample rate (Kokoro = 24 kHz). */
+export type AudioResult = { audio: Float32Array; samplingRate: number };
+
 let worker: Worker | null = null;
 let seq = 0;
-const pending = new Map<number, { resolve: (url: string) => void; reject: (e: Error) => void }>();
+const pending = new Map<number, { resolve: (a: AudioResult) => void; reject: (e: Error) => void }>();
 let readyHandler: ((backend: Backend) => void) | null = null;
 // Whether the model has already warmed up. The worker posts "ready" only once,
 // so we remember it: a caller that registers after that (e.g. a remounted
@@ -35,7 +38,7 @@ function ensureWorker(): Worker {
         const p = pending.get(msg.id);
         if (p) {
           pending.delete(msg.id);
-          p.resolve(URL.createObjectURL(encodeWav(msg.audio, msg.samplingRate)));
+          p.resolve({ audio: msg.audio, samplingRate: msg.samplingRate });
         }
         break;
       }
@@ -62,21 +65,35 @@ export function initTTS(onReady: (backend: Backend) => void) {
   if (ready) onReady(readyBackend);
 }
 
-/** Synthesize `text` with `voice` and resolve with a WAV object URL (caller revokes it). */
-export function synthesize(text: string, voice: string): Promise<string> {
+// Post a synth request to the worker and resolve with the raw audio.
+function requestSynth(text: string, voice: string, speed: number): Promise<AudioResult> {
   const w = ensureWorker();
   const id = ++seq;
-  return new Promise<string>((resolve, reject) => {
+  return new Promise<AudioResult>((resolve, reject) => {
     pending.set(id, { resolve, reject });
-    w.postMessage({ type: "speak", id, text, voice });
+    w.postMessage({ type: "speak", id, text, voice, speed });
   });
+}
+
+/** Synthesize `text` with `voice` and resolve with a WAV object URL (caller revokes it).
+ * Empty string if superseded/stopped. */
+export function synthesize(text: string, voice: string, speed = 1): Promise<string> {
+  return requestSynth(text, voice, speed).then((a) =>
+    a.audio.length ? URL.createObjectURL(encodeWav(a.audio, a.samplingRate)) : "",
+  );
+}
+
+/** Synthesize raw mono Float32 PCM (for the SAPI bridge). `speed` is the Kokoro
+ * rate multiplier (1 = normal). Resolves with an empty array if stopped. */
+export function synthesizeRaw(text: string, voice: string, speed = 1): Promise<AudioResult> {
+  return requestSynth(text, voice, speed);
 }
 
 /** Cancel in-flight synthesis. Pending requests resolve with "" (an empty URL)
  * so awaiting callers unwind without throwing. */
 export function stopTTS() {
   worker?.postMessage({ type: "stop" });
-  for (const [, p] of pending) p.resolve("");
+  for (const [, p] of pending) p.resolve({ audio: new Float32Array(0), samplingRate: 24000 });
   pending.clear();
 }
 

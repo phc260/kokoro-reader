@@ -5,7 +5,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager};
 
-pub mod onnx_patch;
+mod pipe_server;
 
 // ---------------------------------------------------------------------------
 // Kokoro TTS model: downloaded into the app data dir on first run, then served
@@ -165,52 +165,17 @@ async fn verify_model(app: AppHandle) -> Result<VerifyResult, String> {
     .map_err(|e| e.to_string())?
 }
 
-// Generate onnx/model_dml.onnx (DirectML-patched) from the downloaded fp32
-// onnx/model.onnx so kokoro_worker.exe's GPU path has its model. Idempotent:
-// returns 0 if the file already exists. The (large) ONNX is decoded/encoded, so
-// callers run this on a blocking thread.
-fn ensure_dml_model(dir: &Path, model_id: &str) -> Result<usize, String> {
-    let dst = model_file_path(dir, model_id, "onnx/model_dml.onnx");
-    if std::fs::metadata(&dst).map(|m| m.len() > 0).unwrap_or(false) {
-        return Ok(0);
-    }
-    let src = model_file_path(dir, model_id, "onnx/model.onnx");
-    let bytes = std::fs::read(&src).map_err(|e| format!("read {}: {e}", src.display()))?;
-    let (patched, n) = onnx_patch::patch_convtranspose_2d(&bytes)?;
-    // Atomic commit: write a temp sibling, then rename into place.
-    let part = dst.with_extension("part");
-    std::fs::write(&part, &patched).map_err(|e| e.to_string())?;
-    std::fs::rename(&part, &dst).map_err(|e| e.to_string())?;
-    Ok(n)
-}
-
-// Best-effort wrapper: prepare the DML model for the worker without failing the
-// download. The worker falls back to the CPU model (onnx/model_uint8.onnx) if
-// onnx/model_dml.onnx is missing, so a patch failure is logged, not fatal.
-async fn ensure_dml_and_log(dir: &Path, model_id: &str) {
-    let dir = dir.to_path_buf();
-    let model_id = model_id.to_string();
-    match tauri::async_runtime::spawn_blocking(move || ensure_dml_model(&dir, &model_id)).await {
-        Ok(Ok(n)) if n > 0 => eprintln!("[model] patched {n} ConvTranspose node(s) -> model_dml.onnx"),
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => eprintln!("[model] DML patch skipped: {e}"),
-        Err(e) => eprintln!("[model] DML patch task panicked: {e}"),
-    }
-}
-
 // Download the Kokoro model + curated voice packs into the app data dir,
 // emitting `model-download-progress` as bytes arrive. Each file is verified
 // against its manifest SHA-256 before being committed. Idempotent and
-// resumable: skips the download if every file is already present, and on a
-// re-run skips files already on disk that verify, re-fetching only the rest.
-// After the manifest files are in place it derives onnx/model_dml.onnx for the
-// SAPI worker's GPU path.
+// resumable: returns early if every file is already present, and on a re-run
+// skips files already on disk that verify, re-fetching only the rest. The
+// webview (WebGPU) and the SAPI bridge both read these files.
 #[tauri::command]
 async fn download_model(app: AppHandle) -> Result<(), String> {
     let dir = model_dir(&app)?;
     let manifest = load_manifest()?;
     if model_is_complete(&dir, &manifest) {
-        ensure_dml_and_log(&dir, &manifest.model_id).await;
         return Ok(());
     }
 
@@ -283,7 +248,6 @@ async fn download_model(app: AppHandle) -> Result<(), String> {
         std::fs::rename(&part, &dest).map_err(|e| e.to_string())?;
     }
 
-    ensure_dml_and_log(&dir, &manifest.model_id).await;
     Ok(())
 }
 
@@ -392,10 +356,79 @@ fn serve_model_file(
     .unwrap()
 }
 
+// Directory the SAPI engine reads its assets/controls from — the AssetDir on the
+// registered voice token (written by DllRegisterServer into the 32-bit registry
+// view that Kindle reads).
+#[cfg(windows)]
+fn sapi_asset_dir() -> Result<PathBuf, String> {
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+    use winreg::RegKey;
+    let attrs = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(r"SOFTWARE\WOW6432Node\Microsoft\Speech\Voices\Tokens\KokoroTTS\Attributes")
+        .map_err(|_| "Kokoro SAPI voice is not registered".to_string())?;
+    let dir: String = attrs
+        .get_value("AssetDir")
+        .map_err(|_| "voice token has no AssetDir".to_string())?;
+    Ok(PathBuf::from(dir))
+}
+
+#[cfg(not(windows))]
+fn sapi_asset_dir() -> Result<PathBuf, String> {
+    Err("the SAPI voice is Windows-only".into())
+}
+
+// Write the SAPI engine's runtime controls (narrator / speed multiplier / volume
+// gain) to controls.ini in its AssetDir, so the in-Kindle engine picks them up on
+// its next utterance. Written atomically (temp + rename) so the engine, which
+// re-reads the file every Speak, never sees a partial update.
+#[tauri::command]
+fn set_controls(voice: String, speed: f32, gain: f32) -> Result<(), String> {
+    let dir = sapi_asset_dir()?;
+    let body = format!("voice={voice}\nspeed={speed}\ngain={gain}\n");
+    let dest = dir.join("controls.ini");
+    let tmp = dir.join("controls.ini.tmp");
+    std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// Seed the bundled default controls.ini into the engine's AssetDir on startup,
+// so a fresh install has a sane narrator/speed/gain before the user ever touches
+// the sliders. Non-destructive: skips if a controls.ini already exists (that's
+// the user's saved state) and is best-effort — if the voice isn't registered or
+// the resource can't be resolved, the engine just falls back to its own defaults.
+fn seed_controls(app: &AppHandle) {
+    let Ok(dir) = sapi_asset_dir() else { return };
+    let dest = dir.join("controls.ini");
+    if dest.exists() {
+        return;
+    }
+    let Ok(src) = app
+        .path()
+        .resolve("resources/controls.ini", tauri::path::BaseDirectory::Resource)
+    else {
+        return;
+    };
+    if let Some(parent) = dest.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::copy(&src, &dest) {
+        eprintln!("[controls] seed skipped: {e}");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // Shared state + named-pipe server bridging Kindle's SAPI engine to
+        // webview WebGPU synthesis (see pipe_server.rs).
+        .manage(std::sync::Arc::new(pipe_server::Bridge::default()))
+        .setup(|app| {
+            seed_controls(app.handle());
+            pipe_server::start(app.handle().clone());
+            Ok(())
+        })
         .register_uri_scheme_protocol("kokoro", |ctx, request| {
             serve_model_file(ctx.app_handle(), request)
         })
@@ -403,7 +436,9 @@ pub fn run() {
             model_exists,
             model_location,
             download_model,
-            verify_model
+            verify_model,
+            set_controls,
+            pipe_server::synth_result
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
