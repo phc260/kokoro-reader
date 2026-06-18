@@ -356,65 +356,148 @@ fn serve_model_file(
     .unwrap()
 }
 
-// Directory the SAPI engine reads its assets/controls from — the AssetDir on the
-// registered voice token (written by DllRegisterServer into the 32-bit registry
-// view that Kindle reads).
-#[cfg(windows)]
-fn sapi_asset_dir() -> Result<PathBuf, String> {
-    use winreg::enums::HKEY_LOCAL_MACHINE;
-    use winreg::RegKey;
-    let attrs = RegKey::predef(HKEY_LOCAL_MACHINE)
-        .open_subkey(r"SOFTWARE\WOW6432Node\Microsoft\Speech\Voices\Tokens\KokoroTTS\Attributes")
-        .map_err(|_| "Kokoro SAPI voice is not registered".to_string())?;
-    let dir: String = attrs
-        .get_value("AssetDir")
-        .map_err(|_| "voice token has no AssetDir".to_string())?;
-    Ok(PathBuf::from(dir))
+// Path to controls.ini, the app<->engine shared settings file. It ships in the
+// app's resource dir (resources/controls.ini = $INSTDIR\resources\controls.ini
+// when installed); the engine reads the same file from its AssetDir, which it
+// derives from its own DLL location (see Dll.cpp). The app reads/writes it here.
+fn controls_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .resolve(
+            "resources/controls.ini",
+            tauri::path::BaseDirectory::Resource,
+        )
+        .map_err(|e| e.to_string())
 }
 
-#[cfg(not(windows))]
-fn sapi_asset_dir() -> Result<PathBuf, String> {
-    Err("the SAPI voice is Windows-only".into())
+// controls.ini is the app's single record of the engine's runtime settings —
+// `voice`/`speed`/`gain` (read by the engine every Speak) plus `agency`
+// (microsoft|kokoro: which voice Kindle is set to, owned by the app for the UI
+// toggle; the engine ignores it). Parse it as ordered dotenv-style key/values so
+// commands can update one key without clobbering the others. Best-effort: an
+// absent/unreadable file yields an empty list (callers fall back to defaults).
+fn read_controls_kv(app: &AppHandle) -> Vec<(String, String)> {
+    let Ok(path) = controls_path(app) else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            if l.is_empty() || l.starts_with('#') {
+                return None;
+            }
+            let (k, v) = l.split_once('=')?;
+            Some((k.trim().to_string(), v.trim().to_string()))
+        })
+        .collect()
 }
 
-// Write the SAPI engine's runtime controls (narrator / speed multiplier / volume
-// gain) to controls.ini in its AssetDir, so the in-Kindle engine picks them up on
-// its next utterance. Written atomically (temp + rename) so the engine, which
-// re-reads the file every Speak, never sees a partial update.
-#[tauri::command]
-fn set_controls(voice: String, speed: f32, gain: f32) -> Result<(), String> {
-    let dir = sapi_asset_dir()?;
-    let body = format!("voice={voice}\nspeed={speed}\ngain={gain}\n");
-    let dest = dir.join("controls.ini");
+fn upsert_control(kv: &mut Vec<(String, String)>, key: &str, val: String) {
+    match kv.iter_mut().find(|(k, _)| k == key) {
+        Some(entry) => entry.1 = val,
+        None => kv.push((key.to_string(), val)),
+    }
+}
+
+// Write controls.ini atomically (temp + rename) so the engine, which re-reads
+// the file every Speak, never sees a partial update.
+fn write_controls_kv(app: &AppHandle, kv: &[(String, String)]) -> Result<(), String> {
+    let dest = controls_path(app)?;
+    let dir = dest
+        .parent()
+        .ok_or_else(|| "controls.ini has no parent dir".to_string())?;
+    let body: String = kv.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
     let tmp = dir.join("controls.ini.tmp");
     std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
     Ok(())
 }
 
-// Seed the bundled default controls.ini into the engine's AssetDir on startup,
-// so a fresh install has a sane narrator/speed/gain before the user ever touches
-// the sliders. Non-destructive: skips if a controls.ini already exists (that's
-// the user's saved state) and is best-effort — if the voice isn't registered or
-// the resource can't be resolved, the engine just falls back to its own defaults.
-fn seed_controls(app: &AppHandle) {
-    let Ok(dir) = sapi_asset_dir() else { return };
-    let dest = dir.join("controls.ini");
-    if dest.exists() {
-        return;
-    }
-    let Ok(src) = app
+// Update the narrator/speed/gain the app pushes on change, preserving `agency`.
+#[tauri::command]
+fn set_controls(app: AppHandle, voice: String, speed: f32, gain: f32) -> Result<(), String> {
+    let mut kv = read_controls_kv(&app);
+    upsert_control(&mut kv, "voice", voice);
+    upsert_control(&mut kv, "speed", speed.to_string());
+    upsert_control(&mut kv, "gain", gain.to_string());
+    write_controls_kv(&app, &kv)
+}
+
+// Switch Kindle's default SAPI voice between Kokoro and Microsoft David by
+// running kindle-voice-guard.ps1 one-shot (-Set kokoro|david). The guard
+// reg-loads Kindle's MSIX hive, which needs admin, so we relaunch it elevated
+// via `Start-Process -Verb RunAs` (raises a UAC prompt). The user must reopen
+// Kindle for the change to take effect.
+//
+// We WAIT for the elevated guard and only record the choice in controls.ini on
+// success — if the user cancels UAC (`Start-Process` throws) or the guard fails,
+// we return Err so the UI reverts the toggle and the record stays unchanged.
+// Async + spawn_blocking so the UAC wait never blocks the main thread.
+#[cfg(windows)]
+#[tauri::command]
+async fn set_kindle_voice(app: AppHandle, kokoro: bool) -> Result<(), String> {
+    let which = if kokoro { "kokoro" } else { "david" };
+    let script = app
         .path()
-        .resolve("resources/controls.ini", tauri::path::BaseDirectory::Resource)
-    else {
-        return;
-    };
-    if let Some(parent) = dest.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        .resolve(
+            "resources/kindle-voice-guard.ps1",
+            tauri::path::BaseDirectory::Resource,
+        )
+        .map_err(|e| e.to_string())?;
+    // -Verb RunAs raises UAC; -Wait -PassThru lets us read the elevated guard's
+    // exit code. A cancelled UAC throws -> catch -> exit 1. The path is single-
+    // quoted so spaces (Program Files) survive as one ArgumentList element.
+    let inner = format!(
+        "$ErrorActionPreference='Stop'; try {{ $p = Start-Process -Verb RunAs \
+         -FilePath powershell.exe -PassThru -Wait -ArgumentList \
+         '-NoProfile','-ExecutionPolicy','Bypass','-File','{}','-Set','{}'; \
+         exit $p.ExitCode }} catch {{ exit 1 }}",
+        script.display(),
+        which
+    );
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &inner])
+            .status()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err("Kindle voice switch was cancelled or failed".into());
     }
-    if let Err(e) = std::fs::copy(&src, &dest) {
-        eprintln!("[controls] seed skipped: {e}");
-    }
+    // Confirmed: record the app-facing label ("kokoro" | "microsoft"). Best-
+    // effort — the switch already happened, so a write failure shouldn't revert
+    // the UI.
+    let mut kv = read_controls_kv(&app);
+    upsert_control(
+        &mut kv,
+        "agency",
+        if kokoro { "kokoro" } else { "microsoft" }.to_string(),
+    );
+    let _ = write_controls_kv(&app, &kv);
+    Ok(())
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+fn set_kindle_voice(_kokoro: bool) -> Result<(), String> {
+    Err("the SAPI voice is Windows-only".into())
+}
+
+// The app's record of Kindle's current voice agency ("kokoro" | "microsoft"),
+// read from controls.ini so the UI toggle initializes to the last-set state.
+// Defaults to "none" when unset (fresh install / no prior switch) so the toggle
+// shows neither segment selected.
+#[tauri::command]
+fn kindle_voice(app: AppHandle) -> Result<String, String> {
+    Ok(read_controls_kv(&app)
+        .into_iter()
+        .find(|(k, _)| k == "agency")
+        .map(|(_, v)| v)
+        .unwrap_or_else(|| "none".to_string()))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -425,7 +508,6 @@ pub fn run() {
         // webview WebGPU synthesis (see pipe_server.rs).
         .manage(std::sync::Arc::new(pipe_server::Bridge::default()))
         .setup(|app| {
-            seed_controls(app.handle());
             pipe_server::start(app.handle().clone());
             Ok(())
         })
@@ -438,6 +520,8 @@ pub fn run() {
             download_model,
             verify_model,
             set_controls,
+            set_kindle_voice,
+            kindle_voice,
             pipe_server::synth_result
         ])
         .run(tauri::generate_context!())

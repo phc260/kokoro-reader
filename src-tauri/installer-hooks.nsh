@@ -28,6 +28,12 @@
 
   ; Register the COM server + voice token. /s = silent (no message boxes).
   nsExec::ExecToLog '"$WINDIR\SysWOW64\regsvr32.exe" /s "$INSTDIR\resources\KokoroSapi.dll"'
+
+  ; Make Kokoro the Kindle default now that the KokoroTTS token exists. The guard
+  ; reg-loads Kindle's MSIX hive (needs admin -> fine, the installer is elevated)
+  ; and one-shots DefaultTokenId to Kokoro. It self-skips if the hive is absent
+  ; (Kindle not installed), so it never fails the install.
+  nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\resources\kindle-voice-guard.ps1" -Set kokoro'
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL

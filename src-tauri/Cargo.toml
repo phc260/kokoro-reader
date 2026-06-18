@@ -33,7 +33,3 @@ tauri-plugin-opener = "2.5.4"
 # Named-pipe server bridging the SAPI engine (Kindle) to webview WebGPU synthesis.
 tokio = { version = "1", features = ["net", "io-util", "rt", "sync", "time", "macros"] }
 
-# Read the SAPI voice token's AssetDir from the registry to write controls.ini.
-[target.'cfg(windows)'.dependencies]
-winreg = "0.52"
-

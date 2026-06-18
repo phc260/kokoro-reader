@@ -26,7 +26,8 @@
     "targets": "all",
     "resources": {
       "resources/controls.ini": "resources/controls.ini",
-      "../kokoro-sapi/build/KokoroSapi.dll": "resources/KokoroSapi.dll"
+      "../kokoro-sapi/build/KokoroSapi.dll": "resources/KokoroSapi.dll",
+      "../kokoro-sapi/kindle-voice-guard.ps1": "resources/kindle-voice-guard.ps1"
     },
     "windows": {
       "nsis": {
