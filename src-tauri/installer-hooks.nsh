@@ -37,6 +37,12 @@
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
+  ; Revert Kindle's default voice to Microsoft David BEFORE we delete the token,
+  ; so we don't leave Kindle's MSIX hive pointing DefaultTokenId at a KokoroTTS
+  ; token that no longer exists. Runs while the guard script still exists in
+  ; resources\; self-skips if Kindle's hive is absent (Kindle not installed).
+  nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\resources\kindle-voice-guard.ps1" -Set david'
+
   ; Unregister while the DLL still exists — DllUnregisterServer deletes the HKLM
   ; CLSID + voice token. Runs before files are removed.
   nsExec::ExecToLog '"$WINDIR\SysWOW64\regsvr32.exe" /u /s "$INSTDIR\resources\KokoroSapi.dll"'

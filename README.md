@@ -5,6 +5,7 @@ with **one** synthesis engine — [`kokoro-js`](https://www.npmjs.com/package/ko
 on **WebGPU**, in a Tauri webview — serving two front ends:
 
 1. **A desktop reader app** (Tauri 2 + React) — paste text, pick a narrator, listen.
+   A Microsoft/Kokoro toggle also switches Kindle's default voice from inside the app.
 2. **A SAPI5 voice for Windows** — "Kokoro (SAPI5)" appears in the system voice
    list, so apps like **Kindle for PC Read Aloud** narrate books with Kokoro. A
    thin **x86** COM DLL that Kindle loads in-process forwards each utterance over
@@ -53,7 +54,10 @@ COM loads our DLL straight into Kindle and calls its functions:
    **private hive** (`…\Packages\AMZNKindle…\SystemAppData\Helium\User.dat`), not
    real HKCU. Point it at Kokoro: stop Kindle, `reg load` the hive, set
    `Software\Microsoft\Speech\Voices\DefaultTokenId` to the `KokoroTTS` token,
-   `reg unload`.
+   `reg unload`. `kindle-voice-guard.ps1 -Set kokoro|david` automates this; the
+   installer runs it at install time, and the app's **Microsoft/Kokoro toggle**
+   re-runs it elevated (UAC) on demand. The chosen voice is recorded as
+   `agency=` in `controls.ini` so the toggle initializes to the last-set state.
 
 **Streaming.** `Speak` synthesizes **sentence by sentence** — a small first chunk
 (fast first sound) then 4-sentence chunks — with a **depth-1 prefetch pipeline**:
@@ -67,9 +71,10 @@ each page is a fresh `Speak` whose text we can't see in advance.)
 | Path | What |
 |---|---|
 | `src/` | React frontend; `tts.worker.ts` (kokoro-js Web Worker), `tts.ts` (client; `synthesize` / `synthesizeRaw`), `bridge.ts` (SAPI bridge listener), `voices.ts` |
-| `src-tauri/src/lib.rs` | Model download/verify + `kokoro://` asset server |
+| `src-tauri/src/lib.rs` | Model download/verify + `kokoro://` asset server + `controls.ini` read/write (`set_controls`, `set_kindle_voice`, `kindle_voice`) |
 | `src-tauri/src/pipe_server.rs` | Named-pipe server bridging the SAPI engine to webview synthesis |
 | `src-tauri/model-manifest.json` | Files the app downloads from HF (paths + sizes + SHA-256); kept in sync with `src/voices.ts` |
+| `src-tauri/resources/controls.ini` | App↔engine settings the app writes and the engine reads each `Speak`: `voice`/`speed`/`gain` + app-owned `agency` (microsoft\|kokoro) |
 | `kokoro-sapi/src/` | The x86 SAPI engine: `Dll.cpp`, `KokoroTTSEngine.cpp`, `WorkerClient.cpp`, `WorkerProtocol.h` (thin COM shim + pipe client, no deps) |
 | `kokoro-sapi/build.ps1` | Builds the x86 engine (NMake via vcvarsall) |
 | `kokoro-sapi/*.ps1` | `test-speak.ps1` (SAPI smoke test), `kindle-voice-guard.ps1` (hive patch), `switch-voice.ps1` |
@@ -99,8 +104,11 @@ first run into its app-data dir — there's a setup wizard; no manual asset step
 
 - Kindle is **32-bit MSIX**; the engine must be x86, registered under
   `WOW6432Node` (the 32-bit `regsvr32` does this), and its default voice patched
-  in the package hive (above). `kindle-voice-guard.ps1` re-applies the patch if a
-  Kindle update resets it.
+  in the package hive (above). The installer patches it to Kokoro at install time
+  and reverts it to Microsoft David on uninstall (so Kindle isn't left pointing at
+  a removed token); the app's Microsoft/Kokoro toggle re-runs
+  `kindle-voice-guard.ps1` on demand; re-run it manually if a Kindle update resets
+  the voice. Reopen Kindle after a switch for it to take effect.
 - **The app must be running** when Kindle reads — it's the synthesizer. If it
   isn't, the voice is silent (the shim has no local fallback by design).
 - Don't move/delete `kokoro-sapi/` — the registered token references the DLL by

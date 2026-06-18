@@ -65,11 +65,14 @@ in Kindle (or `test-speak.ps1`).
 
 ### Rust backend (`src-tauri/src/`)
 - `lib.rs` — model **download/verify** + the `kokoro://` **asset server**
-  (`serve_model_file`, honors Range + CORS preflight). Commands: `model_exists`,
-  `model_location`, `download_model`, `verify_model`. Files download from
-  HuggingFace into the Tauri **app-data dir** (per `model-manifest.json`,
-  embedded via `include_str!`; its voice entries must stay in sync with `VOICES`
-  in `src/voices.ts`).
+  (`serve_model_file`, honors Range + CORS preflight) + the **controls.ini**
+  read/write helpers. Commands: `model_exists`, `model_location`,
+  `download_model`, `verify_model`, `set_controls` (narrator/speed/gain),
+  `set_kindle_voice` (UAC-elevated guard run that flips Kindle's default voice
+  Kokoro↔Microsoft David), `kindle_voice` (reads the `agency` record so the UI
+  toggle initializes). Files download from HuggingFace into the Tauri **app-data
+  dir** (per `model-manifest.json`, embedded via `include_str!`; its voice
+  entries must stay in sync with `VOICES` in `src/voices.ts`).
 - `pipe_server.rs` — the **SAPI bridge**. A tokio named-pipe **server** at
   `\\.\pipe\KokoroSapiSynth` speaking the `WorkerProtocol.h` wire format. Each
   `'S'` request → `emit("synth-request", {id,text,voice,speed})` → the frontend
@@ -96,15 +99,22 @@ in Kindle (or `test-speak.ps1`).
 
 ### Packaging / installer
 - `tauri.conf.json` `bundle.resources` is a **map**: it pulls the x86 DLL straight
-  from `../kokoro-sapi/build/KokoroSapi.dll` into the bundle's `resources/`, so
-  `kokoro-sapi\build.ps1` **must run before `tauri build`** or bundling fails.
+  from `../kokoro-sapi/build/KokoroSapi.dll` into the bundle's `resources/` (along
+  with `controls.ini` and `kindle-voice-guard.ps1`), so `kokoro-sapi\build.ps1`
+  **must run before `tauri build`** or bundling fails.
 - `.github/workflows/installer.yml` — one `windows-latest` job that enforces that
   ordering (build DLL → `bun install` → `tauri build`) and uploads the NSIS/MSI on
   a `v*` tag. (`native.yml` still builds + uploads just the DLL for `kokoro-sapi/**`.)
 - `src-tauri/installer-hooks.nsh` (wired via `bundle.windows.nsis.installerHooks`) —
-  POSTINSTALL registers the DLL (`$WINDIR\SysWOW64\regsvr32.exe /s`, the 32-bit one),
-  creates `$INSTDIR\models`, grants Users modify on it, and seeds `controls.ini`;
-  PREUNINSTALL runs `regsvr32 /u`; POSTUNINSTALL removes the `models` dir.
+  POSTINSTALL creates `$INSTDIR\models`, grants Users modify on it, seeds it with a
+  copy of the bundled `controls.ini`, registers the DLL (`$WINDIR\SysWOW64\regsvr32.exe
+  /s`, the 32-bit one), then runs `kindle-voice-guard.ps1 -Set kokoro` to make
+  Kokoro Kindle's default voice (self-skips if Kindle's hive is absent);
+  PREUNINSTALL first runs `kindle-voice-guard.ps1 -Set david` (revert Kindle's
+  default to Microsoft David **before** the token is deleted, so its hive isn't
+  left pointing `DefaultTokenId` at a now-gone `KokoroTTS` token — runs while the
+  guard still exists in `resources\`), then `regsvr32 /u`; POSTUNINSTALL removes
+  the `models` dir.
 
 ## Gotchas / invariants (do not rediscover these)
 
@@ -134,18 +144,37 @@ in Kindle (or `test-speak.ps1`).
 - **Kindle (MSIX) shadows HKCU.** Its SAPI default voice (`DefaultTokenId`) comes
   from the package hive
   (`…\Packages\AMZNKindle…\SystemAppData\Helium\User.dat`), not real HKCU. Patch
-  it via `reg load`/`unload` with Kindle stopped (`kindle-voice-guard.ps1`
-  re-applies it if an update resets it). The OneCore registry is a dead end —
-  Kindle uses classic `SpVoice`.
+  it via `reg load`/`unload` with Kindle stopped — `kindle-voice-guard.ps1 -Set
+  kokoro|david` does this one-shot. It runs in four places: the installer
+  POSTINSTALL hook (`-Set kokoro` after the token registers), the PREUNINSTALL
+  hook (`-Set david` before the token is deleted, so Kindle isn't left pointing at
+  a gone token), the in-app **Microsoft/Kokoro toggle** (`set_kindle_voice`
+  relaunches it elevated via `Start-Process -Verb RunAs` → UAC), and manually if a
+  Kindle update resets it. All paths self-skip if the hive is absent. The reg-load needs admin, so the toggle path raises a UAC prompt and
+  only records the new `agency` once the elevated guard exits 0. The OneCore
+  registry is a dead end — Kindle uses classic `SpVoice`.
 - **The kokoro:// scheme URL is per-platform.** macOS/Linux `kokoro://localhost/`;
   Windows/Android `http(s)://kokoro.localhost/` (WebView2 has no bare schemes).
   `tts.worker.ts` derives it from `self.location.protocol` — don't hardcode it.
-- **App → engine controls** go through `models/controls.ini` (dotenv-style
-  `voice=`/`speed=`/`gain=`), written atomically by the `set_controls` Tauri
-  command to the token's `AssetDir` (read from the registry) and parsed by the
-  engine's `ReadControls()` every `Speak`: `voice` is the narrator, `speed`/`gain`
-  multiply the host's rate/volume. The app's narrator dropdown + speed/volume
-  sliders push this on change, so they drive Kindle too.
+- **App → engine controls** go through `controls.ini` (dotenv-style, ordered
+  key/values upserted one at a time so a write never clobbers other keys),
+  written atomically (temp + rename). Keys: `voice`/`speed`/`gain` are read by the
+  engine's `ReadControls()` every `Speak` (`voice` = narrator, `speed`/`gain`
+  multiply the host's rate/volume); `agency` (`microsoft|kokoro`) is **app-owned**
+  — it records which voice Kindle is set to so the UI toggle can initialize, and
+  the engine ignores it. `set_controls` pushes the narrator + speed/volume sliders
+  on change, so they drive Kindle too. The app no longer reads the live registry
+  for any of this (the `winreg` dep was dropped); `agency` lives only in
+  `controls.ini`.
+- **controls.ini path divergence (known bug on `main`).** `controls_path()`
+  resolves to the app's **resource dir** (`$INSTDIR\resources\controls.ini`), but
+  the engine reads from its **AssetDir** (`$INSTDIR\models\controls.ini`). The
+  installer seeds the `models` copy once (POSTINSTALL `CopyFiles`), but runtime
+  writes land in `resources\` and never reach the engine — so narrator/speed/gain/
+  agency changes don't reach Kindle after the install-time seed. The dangling
+  `v0.1.2` tag fixes this (point `controls_path()` at the AssetDir, branching on
+  `debug_assertions`) but is **not merged into `main`**. **Invariant once fixed:
+  the app must write the same file the engine's `ReadControls()` reads.**
 - **Background WebGPU.** When the app is hidden/tray (the daemon use case),
   Chromium can throttle the renderer; pass
   `--disable-background-timer-throttling --disable-renderer-backgrounding
