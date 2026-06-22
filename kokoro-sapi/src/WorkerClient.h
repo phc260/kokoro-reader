@@ -16,10 +16,11 @@ public:
     // (i.e. the kokoro-reader app isn't running).
     bool EnsureConnected();
 
-    // Appends 24 kHz float PCM for utf8Text. voiceUtf8 "" => the app's default.
-    bool Synthesize(const std::string& utf8Text, float speed,
-                    std::vector<float>& outSamples,
-                    const std::string& voiceUtf8 = std::string());
+    // Appends 24 kHz float PCM for utf8Text. `rate` is the host's rate-derived
+    // speed multiplier; the app picks the narrator voice and folds in the user's
+    // speed/gain itself (see WorkerProtocol.h).
+    bool Synthesize(const std::string& utf8Text, float rate,
+                    std::vector<float>& outSamples);
 
     void Close();
 

@@ -21,21 +21,16 @@ bool WorkerClient::EnsureConnected() {
     return false;
 }
 
-bool WorkerClient::Synthesize(const std::string& utf8Text, float speed,
-                              std::vector<float>& outSamples,
-                              const std::string& voiceUtf8) {
+bool WorkerClient::Synthesize(const std::string& utf8Text, float rate,
+                              std::vector<float>& outSamples) {
     if (m_pipe == INVALID_HANDLE_VALUE) return false;
     if (utf8Text.empty()) return true;
     if (utf8Text.size() > kMaxTextBytes) return false;
-    if (voiceUtf8.size() > kMaxVoiceBytes) return false;
 
-    const uint8_t  cmd        = kCmdSynth;
-    const uint16_t voiceBytes = static_cast<uint16_t>(voiceUtf8.size());
-    const uint32_t textBytes  = static_cast<uint32_t>(utf8Text.size());
+    const uint8_t  cmd       = kCmdSynth;
+    const uint32_t textBytes = static_cast<uint32_t>(utf8Text.size());
     if (!WriteExact(m_pipe, &cmd, sizeof(cmd)) ||
-        !WriteExact(m_pipe, &speed, sizeof(speed)) ||
-        !WriteExact(m_pipe, &voiceBytes, sizeof(voiceBytes)) ||
-        (voiceBytes && !WriteExact(m_pipe, voiceUtf8.data(), voiceBytes)) ||
+        !WriteExact(m_pipe, &rate, sizeof(rate)) ||
         !WriteExact(m_pipe, &textBytes, sizeof(textBytes)) ||
         !WriteExact(m_pipe, utf8Text.data(), textBytes)) {
         Close();  // broken pipe: next Speak() reconnects/respawns

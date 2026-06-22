@@ -135,26 +135,10 @@ STDAPI DllRegisterServer() {
     SetString(key, L"Gender",   L"Female");
     SetString(key, L"Language", L"409");  // en-US (LCID 0x0409)
 
-    // Where the engine finds onnx/ models / voices / espeak-ng-data, and which
-    // voice style file to use. <dll dir>\models, else <dll dir>\..\models
-    // (the dev layout: build\KokoroSapi.dll next to ..\models).
-    {
-        wchar_t dir[MAX_PATH];
-        StringCchCopyW(dir, ARRAYSIZE(dir), dllPath);
-        wchar_t* slash = wcsrchr(dir, L'\\');
-        if (slash) *slash = L'\0';
-
-        wchar_t assets[MAX_PATH], probe[MAX_PATH];
-        StringCchPrintfW(probe, ARRAYSIZE(probe), L"%s\\models", dir);
-        if (GetFileAttributesW(probe) == INVALID_FILE_ATTRIBUTES)
-            StringCchPrintfW(probe, ARRAYSIZE(probe), L"%s\\..\\models", dir);
-        // Canonicalize so the stored path has no "..".
-        if (GetFullPathNameW(probe, ARRAYSIZE(assets), assets, nullptr) == 0)
-            StringCchCopyW(assets, ARRAYSIZE(assets), probe);
-
-        SetString(key, L"AssetDir",  assets);
-        SetString(key, L"VoiceFile", L"af_heart");
-    }
+    // Informational default-narrator attribute. The engine no longer reads it —
+    // the kokoro-reader app owns the narrator (webview localStorage) and applies
+    // it during synthesis — so it carries no asset-dir path and nothing runtime.
+    SetString(key, L"VoiceFile", L"af_heart");
 
     return S_OK;
 }

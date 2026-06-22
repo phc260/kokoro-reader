@@ -56,8 +56,9 @@ COM loads our DLL straight into Kindle and calls its functions:
    `Software\Microsoft\Speech\Voices\DefaultTokenId` to the `KokoroTTS` token,
    `reg unload`. `kindle-voice-guard.ps1 -Set kokoro|david` automates this; the
    installer runs it at install time, and the app's **Microsoft/Kokoro toggle**
-   re-runs it elevated (UAC) on demand. The chosen voice is recorded as
-   `agency=` in `controls.ini` so the toggle initializes to the last-set state.
+   re-runs it elevated (UAC) on demand. The chosen voice is recorded in the
+   webview's `localStorage` (`kindle-agency`) so the toggle initializes to the
+   last-set state.
 
 **Streaming.** `Speak` synthesizes **sentence by sentence** — a small first chunk
 (fast first sound) then 4-sentence chunks — with a **depth-1 prefetch pipeline**:
@@ -70,11 +71,10 @@ each page is a fresh `Speak` whose text we can't see in advance.)
 
 | Path | What |
 |---|---|
-| `src/` | React frontend; `tts.worker.ts` (kokoro-js Web Worker), `tts.ts` (client; `synthesize` / `synthesizeRaw`), `bridge.ts` (SAPI bridge listener), `voices.ts` |
-| `src-tauri/src/lib.rs` | Model download/verify + `kokoro://` asset server + `controls.ini` read/write (`set_controls`, `set_kindle_voice`, `kindle_voice`) |
+| `src/` | React frontend; `tts.worker.ts` (kokoro-js Web Worker), `tts.ts` (client; `synthesize` / `synthesizeRaw`), `bridge.ts` (SAPI bridge listener; reads narrator/speed/gain from `localStorage`), `voices.ts` |
+| `src-tauri/src/lib.rs` | Model download/verify + `kokoro://` asset server + `set_kindle_voice` (UAC voice-guard) |
 | `src-tauri/src/pipe_server.rs` | Named-pipe server bridging the SAPI engine to webview synthesis |
 | `src-tauri/model-manifest.json` | Files the app downloads from HF (paths + sizes + SHA-256); kept in sync with `src/voices.ts` |
-| `src-tauri/resources/controls.ini` | App↔engine settings the app writes and the engine reads each `Speak`: `voice`/`speed`/`gain` + app-owned `agency` (microsoft\|kokoro) |
 | `kokoro-sapi/src/` | The x86 SAPI engine: `Dll.cpp`, `KokoroTTSEngine.cpp`, `WorkerClient.cpp`, `WorkerProtocol.h` (thin COM shim + pipe client, no deps) |
 | `kokoro-sapi/build.ps1` | Builds the x86 engine (NMake via vcvarsall) |
 | `kokoro-sapi/*.ps1` | `test-speak.ps1` (SAPI smoke test), `kindle-voice-guard.ps1` (hive patch), `switch-voice.ps1` |

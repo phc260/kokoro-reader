@@ -1,7 +1,2 @@
 # Build output (NMake; produced by build.ps1 / cmake --build)
 build/
-
-# Runtime state + the engine's asset dir. controls.ini (narrator/speed/gain,
-# written by the app's set_controls command) is read by the engine per utterance;
-# the model + voices live in the reader app's own app-data dir, not here.
-models/

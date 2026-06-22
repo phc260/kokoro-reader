@@ -17,7 +17,9 @@ import {
 import GraphicEqIcon from "@mui/icons-material/GraphicEq";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import RecordVoiceOverIcon from "@mui/icons-material/RecordVoiceOver";
+import SpeedIcon from "@mui/icons-material/Speed";
 import StopIcon from "@mui/icons-material/Stop";
+import VolumeUpIcon from "@mui/icons-material/VolumeUp";
 import { invoke } from "@tauri-apps/api/core";
 import { initTTS, stopTTS, synthesize } from "./tts";
 import { VOICES, loadVoice, voiceIntro } from "./voices";
@@ -29,6 +31,13 @@ function loadNum(key: string, def: number): number {
   const v = parseFloat(localStorage.getItem(key) ?? "");
   return Number.isFinite(v) ? v : def;
 }
+
+// Shared slider styling: a chunkier rail/track + larger thumb than the MUI
+// "small" default, so the speed/volume bars are easier to grab.
+const SLIDER_SX = {
+  "& .MuiSlider-rail, & .MuiSlider-track": { height: 4, borderRadius: 2 },
+  "& .MuiSlider-thumb": { width: 14, height: 14 },
+};
 
 // Icon-only transport button: an outlined Button wrapped in a Tooltip, with the
 // icon as children. The span keeps the Tooltip working while the button is
@@ -80,6 +89,13 @@ function App() {
   const kokoro = agency === "kokoro";
   const [error, setError] = useState("");
 
+  // Label for the narrator tooltip: the selected voice's name + group (accent /
+  // gender), so the current pick is legible without opening the dropdown.
+  const current = VOICES.find((v) => v.id === voice);
+  const narratorLabel = current
+    ? `${current.name} · ${current.group}`
+    : "Narrator";
+
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const urlRef = useRef<string>("");
 
@@ -88,28 +104,20 @@ function App() {
       setReady(true);
       setBackend(b);
     });
-    // Reflect Kindle's recorded voice agency in the toggle ("none" | "microsoft"
-    // | "kokoro", from controls.ini). Defaults to "none" if it can't be read.
-    invoke<string>("kindle_voice")
-      .then((v) => {
-        setAgency(v);
-        localStorage.setItem("kindle-agency", v);
-      })
-      .catch((e) => console.debug("[kindle voice] detect skipped:", e));
+    // The voice-agency toggle initializes from localStorage ("kindle-agency",
+    // set on a successful switch below) — see the `agency` state initializer.
     return () => {
       if (urlRef.current) URL.revokeObjectURL(urlRef.current);
     };
   }, []);
 
-  // Persist the controls and push them to the SAPI engine (controls.ini), so the
-  // narrator/speed/gain also drive Kindle. Ignored if the voice isn't registered.
+  // Persist narrator/speed/gain to localStorage. The SAPI bridge (bridge.ts)
+  // reads these same keys when synthesizing for Kindle, so they drive Kindle too
+  // without any app→engine file — the webview is the single source of truth.
   useEffect(() => {
     localStorage.setItem("tts-voice", voice);
     localStorage.setItem("tts-speed", String(speed));
     localStorage.setItem("tts-gain", String(gain));
-    invoke("set_controls", { voice, speed, gain }).catch((e) =>
-      console.debug("[controls] set_controls skipped:", e),
-    );
   }, [voice, speed, gain]);
 
   async function play() {
@@ -160,8 +168,8 @@ function App() {
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 2, p: 3 }}>
       <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-        <Tooltip title="Voice">
-          <GraphicEqIcon fontSize="small" color="action" />
+        <Tooltip title="Voice Mode">
+          <GraphicEqIcon fontSize="medium" color="action" />
         </Tooltip>
         <ToggleButtonGroup
           exclusive
@@ -179,38 +187,46 @@ function App() {
             },
           }}
         >
-          <ToggleButton value="microsoft">Microsoft</ToggleButton>
-          <ToggleButton value="kokoro">Kokoro</ToggleButton>
+          <Tooltip title="Set Kindle's voice to Microsoft David">
+            <ToggleButton value="microsoft">Microsoft</ToggleButton>
+          </Tooltip>
+          <Tooltip title="Set Kindle's voice to Kokoro">
+            <ToggleButton value="kokoro">Kokoro</ToggleButton>
+          </Tooltip>
         </ToggleButtonGroup>
       </Box>
 
       <Box sx={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 2 }}>
         <Box sx={{ display: "flex", alignItems: "center", gap: 1, width: 220 }}>
-          <RecordVoiceOverIcon fontSize="small" color="action" />
-          <FormControl size="small" fullWidth>
-            <Select
-              aria-label="Narrator"
-              value={voice}
-              onChange={(e) => setVoice(e.target.value)}
-              disabled={!ready || !kokoro}
-              MenuProps={{ slotProps: { paper: { sx: { maxHeight: 360 } } } }}
-            >
-              {VOICES.flatMap((v, i) => {
-                const items = [];
-                if (i === 0 || v.group !== VOICES[i - 1].group) {
+          <Tooltip title="Narrator">
+            <RecordVoiceOverIcon fontSize="medium" color="action" />
+          </Tooltip>
+          <Tooltip title={narratorLabel}>
+            <FormControl size="small" fullWidth>
+              <Select
+                aria-label="Narrator"
+                value={voice}
+                onChange={(e) => setVoice(e.target.value)}
+                disabled={!ready || !kokoro}
+                MenuProps={{ slotProps: { paper: { sx: { maxHeight: 360 } } } }}
+              >
+                {VOICES.flatMap((v, i) => {
+                  const items = [];
+                  if (i === 0 || v.group !== VOICES[i - 1].group) {
+                    items.push(
+                      <ListSubheader key={v.group}>{v.group}</ListSubheader>,
+                    );
+                  }
                   items.push(
-                    <ListSubheader key={v.group}>{v.group}</ListSubheader>,
+                    <MenuItem key={v.id} value={v.id}>
+                      {v.name}
+                    </MenuItem>,
                   );
-                }
-                items.push(
-                  <MenuItem key={v.id} value={v.id}>
-                    {v.name}
-                  </MenuItem>,
-                );
-                return items;
-              })}
-            </Select>
-          </FormControl>
+                  return items;
+                })}
+              </Select>
+            </FormControl>
+          </Tooltip>
         </Box>
 
         {busy || playing ? (
@@ -223,7 +239,7 @@ function App() {
           </ControlButton>
         ) : (
           <ControlButton
-            label="Play"
+            label="Preview"
             onClick={play}
             disabled={!ready || !kokoro}
           >
@@ -232,34 +248,44 @@ function App() {
         )}
       </Box>
 
-      <Box sx={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
-        <Box sx={{ width: 220 }}>
-          <Typography variant="caption" color="text.secondary">
-            Speed — {Math.round(speed * 100)}%
-          </Typography>
-          <Slider
-            size="small"
-            value={speed}
-            min={0.5}
-            max={2}
-            step={0.05}
-            disabled={!kokoro}
-            onChange={(_, v) => setSpeed(v as number)}
-          />
+      <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+          <Tooltip title="Reading speed">
+            <SpeedIcon fontSize="medium" color="action" />
+          </Tooltip>
+          <Box sx={{ width: 220 }}>
+            <Slider
+              size="small"
+              sx={SLIDER_SX}
+              value={speed}
+              min={0.5}
+              max={2}
+              step={0.05}
+              disabled={!kokoro}
+              valueLabelDisplay="auto"
+              valueLabelFormat={(v) => `${Math.round(v * 100)}%`}
+              onChange={(_, v) => setSpeed(v as number)}
+            />
+          </Box>
         </Box>
-        <Box sx={{ width: 220 }}>
-          <Typography variant="caption" color="text.secondary">
-            Volume — {Math.round(gain * 100)}%
-          </Typography>
-          <Slider
-            size="small"
-            value={gain}
-            min={0}
-            max={2}
-            step={0.05}
-            disabled={!kokoro}
-            onChange={(_, v) => setGain(v as number)}
-          />
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+          <Tooltip title="Volume">
+            <VolumeUpIcon fontSize="medium" color="action" />
+          </Tooltip>
+          <Box sx={{ width: 220 }}>
+            <Slider
+              size="small"
+              sx={SLIDER_SX}
+              value={gain}
+              min={0}
+              max={2}
+              step={0.05}
+              disabled={!kokoro}
+              valueLabelDisplay="auto"
+              valueLabelFormat={(v) => `${Math.round(v * 100)}%`}
+              onChange={(_, v) => setGain(v as number)}
+            />
+          </Box>
         </Box>
       </Box>
 

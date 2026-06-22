@@ -356,84 +356,15 @@ fn serve_model_file(
     .unwrap()
 }
 
-// Path to controls.ini, the app<->engine shared settings file. It ships in the
-// app's resource dir (resources/controls.ini = $INSTDIR\resources\controls.ini
-// when installed); the engine reads the same file from its AssetDir, which it
-// derives from its own DLL location (see Dll.cpp). The app reads/writes it here.
-fn controls_path(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .resolve(
-            "resources/controls.ini",
-            tauri::path::BaseDirectory::Resource,
-        )
-        .map_err(|e| e.to_string())
-}
-
-// controls.ini is the app's single record of the engine's runtime settings —
-// `voice`/`speed`/`gain` (read by the engine every Speak) plus `agency`
-// (microsoft|kokoro: which voice Kindle is set to, owned by the app for the UI
-// toggle; the engine ignores it). Parse it as ordered dotenv-style key/values so
-// commands can update one key without clobbering the others. Best-effort: an
-// absent/unreadable file yields an empty list (callers fall back to defaults).
-fn read_controls_kv(app: &AppHandle) -> Vec<(String, String)> {
-    let Ok(path) = controls_path(app) else {
-        return Vec::new();
-    };
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    text.lines()
-        .filter_map(|l| {
-            let l = l.trim();
-            if l.is_empty() || l.starts_with('#') {
-                return None;
-            }
-            let (k, v) = l.split_once('=')?;
-            Some((k.trim().to_string(), v.trim().to_string()))
-        })
-        .collect()
-}
-
-fn upsert_control(kv: &mut Vec<(String, String)>, key: &str, val: String) {
-    match kv.iter_mut().find(|(k, _)| k == key) {
-        Some(entry) => entry.1 = val,
-        None => kv.push((key.to_string(), val)),
-    }
-}
-
-// Write controls.ini atomically (temp + rename) so the engine, which re-reads
-// the file every Speak, never sees a partial update.
-fn write_controls_kv(app: &AppHandle, kv: &[(String, String)]) -> Result<(), String> {
-    let dest = controls_path(app)?;
-    let dir = dest
-        .parent()
-        .ok_or_else(|| "controls.ini has no parent dir".to_string())?;
-    let body: String = kv.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
-    let tmp = dir.join("controls.ini.tmp");
-    std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-// Update the narrator/speed/gain the app pushes on change, preserving `agency`.
-#[tauri::command]
-fn set_controls(app: AppHandle, voice: String, speed: f32, gain: f32) -> Result<(), String> {
-    let mut kv = read_controls_kv(&app);
-    upsert_control(&mut kv, "voice", voice);
-    upsert_control(&mut kv, "speed", speed.to_string());
-    upsert_control(&mut kv, "gain", gain.to_string());
-    write_controls_kv(&app, &kv)
-}
-
 // Switch Kindle's default SAPI voice between Kokoro and Microsoft David by
 // running kindle-voice-guard.ps1 one-shot (-Set kokoro|david). The guard
 // reg-loads Kindle's MSIX hive, which needs admin, so we relaunch it elevated
 // via `Start-Process -Verb RunAs` (raises a UAC prompt). The user must reopen
 // Kindle for the change to take effect.
 //
-// We WAIT for the elevated guard and only record the choice in controls.ini on
-// success — if the user cancels UAC (`Start-Process` throws) or the guard fails,
-// we return Err so the UI reverts the toggle and the record stays unchanged.
+// We WAIT for the elevated guard and return Err if the user cancels UAC
+// (`Start-Process` throws) or the guard fails, so the UI reverts the toggle. On
+// success the webview records the choice itself (localStorage "kindle-agency").
 // Async + spawn_blocking so the UAC wait never blocks the main thread.
 #[cfg(windows)]
 #[tauri::command]
@@ -468,16 +399,6 @@ async fn set_kindle_voice(app: AppHandle, kokoro: bool) -> Result<(), String> {
     if !status.success() {
         return Err("Kindle voice switch was cancelled or failed".into());
     }
-    // Confirmed: record the app-facing label ("kokoro" | "microsoft"). Best-
-    // effort — the switch already happened, so a write failure shouldn't revert
-    // the UI.
-    let mut kv = read_controls_kv(&app);
-    upsert_control(
-        &mut kv,
-        "agency",
-        if kokoro { "kokoro" } else { "microsoft" }.to_string(),
-    );
-    let _ = write_controls_kv(&app, &kv);
     Ok(())
 }
 
@@ -485,19 +406,6 @@ async fn set_kindle_voice(app: AppHandle, kokoro: bool) -> Result<(), String> {
 #[tauri::command]
 fn set_kindle_voice(_kokoro: bool) -> Result<(), String> {
     Err("the SAPI voice is Windows-only".into())
-}
-
-// The app's record of Kindle's current voice agency ("kokoro" | "microsoft"),
-// read from controls.ini so the UI toggle initializes to the last-set state.
-// Defaults to "none" when unset (fresh install / no prior switch) so the toggle
-// shows neither segment selected.
-#[tauri::command]
-fn kindle_voice(app: AppHandle) -> Result<String, String> {
-    Ok(read_controls_kv(&app)
-        .into_iter()
-        .find(|(k, _)| k == "agency")
-        .map(|(_, v)| v)
-        .unwrap_or_else(|| "none".to_string()))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -519,9 +427,7 @@ pub fn run() {
             model_location,
             download_model,
             verify_model,
-            set_controls,
             set_kindle_voice,
-            kindle_voice,
             pipe_server::synth_result
         ])
         .run(tauri::generate_context!())

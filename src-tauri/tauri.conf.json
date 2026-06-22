@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "kokoro-reader",
-        "width": 800,
-        "height": 600
+        "width": 400,
+        "height": 300
       }
     ],
     "security": {
@@ -25,7 +25,6 @@
     "active": true,
     "targets": "all",
     "resources": {
-      "resources/controls.ini": "resources/controls.ini",
       "../kokoro-sapi/build/KokoroSapi.dll": "resources/KokoroSapi.dll",
       "../kokoro-sapi/kindle-voice-guard.ps1": "resources/kindle-voice-guard.ps1"
     },

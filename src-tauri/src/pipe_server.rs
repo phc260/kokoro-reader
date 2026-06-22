@@ -24,7 +24,6 @@ const CMD_SYNTH: u8 = b'S';
 const CMD_INFO: u8 = b'I';
 const SYNTH_ERROR: u32 = 0xFFFF_FFFF;
 const MAX_TEXT: u32 = 1 << 20;
-const MAX_VOICE: u16 = 64;
 const SYNTH_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Correlates pipe requests with frontend responses. Shared (via Tauri state)
@@ -56,8 +55,10 @@ impl Bridge {
 struct SynthRequest {
     id: u64,
     text: String,
-    voice: String,
-    speed: f32,
+    // Host's rate-derived speed multiplier (1 = host normal). The frontend owns
+    // the narrator voice + the user's speed/gain (from localStorage) and folds
+    // `rate` into the final synthesis speed — see bridge.ts / WorkerProtocol.h.
+    rate: f32,
 }
 
 /// Frontend → backend: raw little-endian f32 PCM (24 kHz mono) for request `id`.
@@ -111,17 +112,8 @@ async fn serve_client(
             }
             CMD_SYNTH => {
                 let mut b4 = [0u8; 4];
-                let mut b2 = [0u8; 2];
                 pipe.read_exact(&mut b4).await?;
-                let speed = f32::from_le_bytes(b4);
-                pipe.read_exact(&mut b2).await?;
-                let vlen = u16::from_le_bytes(b2);
-                if vlen > MAX_VOICE {
-                    return Ok(());
-                }
-                let mut vbuf = vec![0u8; vlen as usize];
-                pipe.read_exact(&mut vbuf).await?;
-                let voice = String::from_utf8_lossy(&vbuf).into_owned();
+                let rate = f32::from_le_bytes(b4);
                 pipe.read_exact(&mut b4).await?;
                 let tlen = u32::from_le_bytes(b4);
                 if tlen == 0 || tlen > MAX_TEXT {
@@ -132,7 +124,7 @@ async fn serve_client(
                 let text = String::from_utf8_lossy(&tbuf).into_owned();
 
                 let (id, rx) = bridge.register();
-                let _ = app.emit("synth-request", SynthRequest { id, text, voice, speed });
+                let _ = app.emit("synth-request", SynthRequest { id, text, rate });
                 let pcm = match tokio::time::timeout(SYNTH_TIMEOUT, rx).await {
                     Ok(Ok(pcm)) => pcm,
                     _ => {

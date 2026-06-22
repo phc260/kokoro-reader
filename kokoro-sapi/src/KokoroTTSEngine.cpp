@@ -11,9 +11,8 @@
 #include <algorithm>
 
 // Global live-object counter (defined in Dll.cpp) so the DLL knows when it is
-// safe to unload, and the DLL's own HINSTANCE for locating assets.
+// safe to unload.
 extern long g_cObjects;
-extern HINSTANCE g_hInst;
 
 namespace {
 
@@ -26,76 +25,6 @@ constexpr int kSampleRate = 24000;
 // g_synthMutex (the app handles one request at a time per connection anyway).
 WorkerClient g_worker;
 std::mutex   g_synthMutex;
-
-// Resolved once: where default_voice.txt lives, and the token's voice fallback.
-std::wstring g_assetDir, g_voiceName;
-
-std::wstring DllDir() {
-    wchar_t buf[MAX_PATH];
-    if (GetModuleFileNameW(g_hInst, buf, MAX_PATH) == 0) return L"";
-    std::wstring p(buf);
-    const size_t slash = p.find_last_of(L'\\');
-    return slash == std::wstring::npos ? L"" : p.substr(0, slash);
-}
-
-bool DirExists(const std::wstring& p) {
-    const DWORD a = GetFileAttributesW(p.c_str());
-    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
-}
-
-// Runtime controls the kokoro-reader app writes to <assets>\controls.ini, read
-// per utterance so a change applies on the next Speak. dotenv-style "key=value"
-// lines; blank lines and '#' comments ignored; unknown keys ignored:
-//   voice=am_michael
-//   speed=1.15      # multiplier on the host's rate-derived speed
-//   gain=1.0        # multiplier on the host volume
-struct Controls {
-    std::wstring voice;       // narrator; defaults to the token's VoiceFile
-    float        speed = 1.0f;
-    float        gain  = 1.0f;
-};
-
-Controls ReadControls() {
-    Controls c;
-    c.voice = g_voiceName;
-    FILE* f = _wfopen((g_assetDir + L"\\controls.ini").c_str(), L"rb");
-    if (!f) return c;
-    char buf[512];
-    const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-    fclose(f);
-    const std::string text(buf, n);
-
-    auto trim = [](const std::string& s) {
-        const size_t a = s.find_first_not_of(" \t\r\n");
-        if (a == std::string::npos) return std::string();
-        const size_t b = s.find_last_not_of(" \t\r\n");
-        return s.substr(a, b - a + 1);
-    };
-
-    size_t pos = 0;
-    while (pos < text.size()) {
-        const size_t eol = text.find('\n', pos);
-        const std::string line =
-            trim(text.substr(pos, eol == std::string::npos ? std::string::npos : eol - pos));
-        pos = (eol == std::string::npos) ? text.size() : eol + 1;
-        if (line.empty() || line[0] == '#') continue;
-        const size_t eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        const std::string key = trim(line.substr(0, eq));
-        const std::string val = trim(line.substr(eq + 1));
-        if (key == "voice") {
-            if (!val.empty()) c.voice.assign(val.begin(), val.end());  // ASCII voice id
-        } else if (key == "speed") {
-            try { c.speed = std::stof(val); } catch (...) {}
-        } else if (key == "gain") {
-            try { c.gain = std::stof(val); } catch (...) {}
-        }
-    }
-    // Clamp to sane ranges (defends against a garbled file).
-    c.speed = (std::min)((std::max)(c.speed, 0.5f), 2.0f);
-    c.gain = (std::min)((std::max)(c.gain, 0.0f), 2.0f);
-    return c;
-}
 
 // Split text into chunks for sentence-streaming. We ramp up: the FIRST chunk is
 // a single sentence (so audio starts quickly), then chunks coalesce 4 sentences
@@ -240,36 +169,12 @@ STDMETHODIMP KokoroTTSEngine::GetObjectToken(ISpObjectToken** ppToken) {
 
 // ---- synth bring-up --------------------------------------------------------
 
-// Reads one string from the voice token's Attributes key ("" if absent).
-std::wstring KokoroTTSEngine::TokenAttr(const wchar_t* name) {
-    if (!m_pToken) return L"";
-    ISpDataKey* attrs = nullptr;
-    if (FAILED(m_pToken->OpenKey(L"Attributes", &attrs)) || !attrs) return L"";
-    wchar_t* val = nullptr;
-    std::wstring out;
-    if (SUCCEEDED(attrs->GetStringValue(name, &val)) && val) {
-        out = val;
-        CoTaskMemFree(val);
-    }
-    attrs->Release();
-    return out;
-}
-
-// Resolves the asset dir (for default_voice.txt) once, then connects to the
-// app's synthesis pipe. Returns false if the app isn't running.
+// Connects to the app's synthesis pipe. Returns false if the app isn't running.
+// The engine holds no narrator/speed/gain state — the app owns those (from its
+// webview localStorage) and applies them itself, so there's nothing else to set
+// up here.
 bool KokoroTTSEngine::EnsureSynth() {
     std::lock_guard<std::mutex> lk(g_synthMutex);
-    if (g_assetDir.empty()) {
-        std::wstring assets = TokenAttr(L"AssetDir");
-        if (assets.empty() || !DirExists(assets)) {
-            const std::wstring base = DllDir();
-            assets = base + L"\\models";
-            if (!DirExists(assets)) assets = base + L"\\..\\models";
-        }
-        g_assetDir = assets;
-        std::wstring voice = TokenAttr(L"VoiceFile");
-        g_voiceName = voice.empty() ? L"af_heart" : voice;
-    }
     const bool up = g_worker.EnsureConnected();
     if (!up) KokoroLog("EnsureSynth: app pipe unavailable");
     return up;
@@ -327,16 +232,16 @@ STDMETHODIMP KokoroTTSEngine::Speak(DWORD /*dwSpeakFlags*/, REFGUID /*rguidForma
     }
     if (text.empty()) return S_OK;
 
-    // App-controlled runtime settings (controls.ini), read once per utterance.
-    const Controls ctrl = ReadControls();
-    const std::string voice = Narrow(ctrl.voice);
-
+    // The app (its webview localStorage) owns the narrator, the user's speed
+    // multiplier and gain; the engine only forwards the host's live rate slider
+    // and applies its volume slider. Speed/voice/gain no longer cross the pipe.
     USHORT volume = 100;
     pOutputSite->GetVolume(&volume);
     long rate = 0;
     pOutputSite->GetRate(&rate);
-    // Host SAPI rate -10..10 -> speed 1/3x..3x (log), times the app's multiplier.
-    float speed = std::pow(3.0f, static_cast<float>(rate) / 10.0f) * ctrl.speed;
+    // Host SAPI rate -10..10 -> speed 1/3x..3x (log). The app multiplies this by
+    // the user's own speed setting before synthesizing.
+    float speed = std::pow(3.0f, static_cast<float>(rate) / 10.0f);
 
     const std::vector<std::wstring> chunks = SplitText(text);
     if (chunks.empty()) return S_OK;
@@ -348,12 +253,12 @@ STDMETHODIMP KokoroTTSEngine::Speak(DWORD /*dwSpeakFlags*/, REFGUID /*rguidForma
     // is serialized by g_synthMutex; on stop we close the pipe to interrupt the
     // in-flight synth, and the next Speak reconnects.
     auto launch = [&](size_t k, float spd) {
-        return std::async(std::launch::async, [&chunks, k, spd, &voice]() {
+        return std::async(std::launch::async, [&chunks, k, spd]() {
             std::vector<float> pcm;
             const std::string utf8 = Narrow(chunks[k]);
             std::lock_guard<std::mutex> lk(g_synthMutex);
-            if (!g_worker.Synthesize(utf8, spd, pcm, voice))
-                (void)(g_worker.EnsureConnected() && g_worker.Synthesize(utf8, spd, pcm, voice));
+            if (!g_worker.Synthesize(utf8, spd, pcm))
+                (void)(g_worker.EnsureConnected() && g_worker.Synthesize(utf8, spd, pcm));
             return pcm;  // empty on failure
         });
     };
@@ -368,7 +273,7 @@ STDMETHODIMP KokoroTTSEngine::Speak(DWORD /*dwSpeakFlags*/, REFGUID /*rguidForma
             const DWORD a = pOutputSite->GetActions();
             if (a & SPVES_RATE) {
                 pOutputSite->GetRate(&rate);
-                speed = std::pow(3.0f, static_cast<float>(rate) / 10.0f) * ctrl.speed;
+                speed = std::pow(3.0f, static_cast<float>(rate) / 10.0f);
             }
             if (a & SPVES_VOLUME) pOutputSite->GetVolume(&volume);
             pending = launch(k + 1, speed);
@@ -381,8 +286,9 @@ STDMETHODIMP KokoroTTSEngine::Speak(DWORD /*dwSpeakFlags*/, REFGUID /*rguidForma
             break;
         }
 
-        // float [-1,1] -> int16 with host volume * app gain applied (clamped below).
-        const float vol = (volume / 100.0f) * ctrl.gain;
+        // float [-1,1] -> int16 with the host volume applied (the app already
+        // applied the user's gain to the PCM). Clamped below.
+        const float vol = volume / 100.0f;
         std::vector<short> out(pcm.size());
         for (size_t i = 0; i < pcm.size(); ++i) {
             float s = pcm[i] * vol;

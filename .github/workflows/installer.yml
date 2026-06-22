@@ -55,7 +55,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       # Runs beforeBuildCommand (bun run build -> tsc + vite), bundles the
-      # NSIS/MSI installers (embedding controls.ini + KokoroSapi.dll), then
+      # NSIS/MSI installers (embedding KokoroSapi.dll), then
       # uploads them to a draft GitHub Release. On a tag push the release uses
       # that tag; a manual run derives the tag from the version (__VERSION__).
       - name: Build and publish release

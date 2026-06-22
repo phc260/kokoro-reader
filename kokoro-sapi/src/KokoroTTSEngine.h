@@ -34,10 +34,8 @@ public:
     STDMETHODIMP GetObjectToken(ISpObjectToken** ppToken);
 
 private:
-    // Lazily loads the process-wide Kokoro synthesizer (model + espeak data).
+    // Connects to the running app's synthesis pipe (no local model/voice state).
     bool EnsureSynth();
-    // Reads one string from the token's Attributes key ("" if absent).
-    std::wstring TokenAttr(const wchar_t* name);
 
     LONG            m_cRef;
     ISpObjectToken* m_pToken;  // the voice token SAPI handed us (owned, AddRef'd)
