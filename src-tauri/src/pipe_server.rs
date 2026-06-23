@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -41,6 +41,17 @@ const GAIN_TIMEOUT: Duration = Duration::from_secs(2);
 // the frontend is slow/absent.
 const CHUNK_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_CHUNK_SENTENCES: u32 = 4;
+// Kokoro's output rate (mono f32). Used for sub-framing + send pacing.
+const SAMPLE_RATE: f64 = 24_000.0;
+// Each chunk's PCM is sliced into sub-frames of this many samples (~250 ms) so
+// gain is re-read this often and the engine sees fine-grained frames.
+const SUBFRAME_SAMPLES: usize = 6_000;
+// Send pacing: never get more than this many seconds of audio ahead of real
+// time. This caps how much already-gain-baked PCM sits buffered in SAPI ahead of
+// the speaker, so a volume/gain change lands within ~this long instead of one
+// whole chunk. It's the responsiveness↔underrun-safety knob: smaller = snappier
+// volume but riskier glitches; synthesis runs ~3× real time so the buffer refills.
+const PACING_LEAD: f64 = 0.5;
 
 /// Correlates pipe requests with frontend responses. Shared (via Tauri state)
 /// between the pipe-serving tasks and the `synth_result` command.
@@ -422,8 +433,9 @@ async fn serve_client(
                 pipe.read_exact(&mut tbuf).await?;
                 let text = String::from_utf8_lossy(&tbuf).into_owned();
 
-                // We own the chunking now: split the whole utterance, then stream
-                // each chunk's PCM back as a frame ([nSamples][gain][samples...]).
+                // We own the chunking now: split the whole utterance, synthesize
+                // each chunk, then stream its PCM back as ~250 ms sub-frames
+                // ([nSamples][gain][samples...]), paced to ~real time.
                 let per_chunk = query_chunk_sentences(&app, &bridge).await;
                 let chunks = split_text(&text, per_chunk);
                 if chunks.is_empty() {
@@ -432,13 +444,17 @@ async fn serve_client(
                 }
 
                 // Depth-1 prefetch: synth chunk k+1 (detached) while we stream k.
-                // The pipe's buffer fills mid-write and blocks, which is the
-                // backpressure that bounds how far ahead we synthesize. An abort
-                // shows up here as a broken-pipe write error (`?`), unwinding the
-                // loop; the in-flight task is dropped.
+                // An abort shows up here as a broken-pipe write error (`?`),
+                // unwinding the loop; the in-flight task is dropped.
                 let mut pending =
                     Some(spawn_synth(app.clone(), bridge.clone(), chunks[0].clone(), rate));
                 let mut failed = false;
+                // Send-pacing clock (whole utterance): we keep at most PACING_LEAD
+                // seconds of audio ahead of real time so SAPI doesn't buffer a
+                // whole chunk of gain-baked PCM ahead of the speaker. The clock
+                // starts on the first sub-frame actually sent.
+                let mut clock: Option<Instant> = None;
+                let mut samples_sent: u64 = 0;
                 for k in 0..chunks.len() {
                     let pcm = pending.take().unwrap().await.ok().flatten();
                     if k + 1 < chunks.len() {
@@ -456,14 +472,31 @@ async fn serve_client(
                             break;
                         }
                     };
-                    // Read gain just before the frame ships (≈ when the engine
-                    // plays it) so a slider move isn't frozen into prefetched PCM.
-                    let gain = query_gain(&app, &bridge).await;
-                    let n = (pcm.len() / 4) as u32; // bytes -> f32 sample count
-                    pipe.write_all(&n.to_le_bytes()).await?;
-                    pipe.write_all(&gain.to_le_bytes()).await?;
-                    if n > 0 {
-                        pipe.write_all(&pcm).await?;
+
+                    // Stream this chunk as paced sub-frames, each carrying a fresh
+                    // gain (re-read ≈ when the engine plays it, so a slider move
+                    // isn't frozen into prefetched PCM).
+                    let total = pcm.len() / 4; // bytes -> f32 sample count
+                    let mut off = 0usize; // sample offset within the chunk
+                    while off < total {
+                        let n = SUBFRAME_SAMPLES.min(total - off);
+                        let gain = query_gain(&app, &bridge).await;
+                        pipe.write_all(&(n as u32).to_le_bytes()).await?;
+                        pipe.write_all(&gain.to_le_bytes()).await?;
+                        pipe.write_all(&pcm[off * 4..(off + n) * 4]).await?;
+                        off += n;
+
+                        // Pace: sleep if we're more than PACING_LEAD ahead of real
+                        // time. Self-correcting — if synthesis falls behind, `ahead`
+                        // shrinks and we send eagerly to catch up.
+                        samples_sent += n as u64;
+                        let clk = clock.get_or_insert_with(Instant::now);
+                        let ahead =
+                            samples_sent as f64 / SAMPLE_RATE - clk.elapsed().as_secs_f64();
+                        if ahead > PACING_LEAD {
+                            tokio::time::sleep(Duration::from_secs_f64(ahead - PACING_LEAD))
+                                .await;
+                        }
                     }
                 }
                 let marker = if failed { SYNTH_ERROR } else { STREAM_END };
