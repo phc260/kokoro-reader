@@ -16,23 +16,21 @@ public:
     // (i.e. the kokoro-reader app isn't running).
     bool EnsureConnected();
 
-    // Appends 24 kHz float PCM for utf8Text. `rate` is the host's rate-derived
-    // speed multiplier; the app picks the narrator voice and folds in the user's
-    // speed/gain itself (see WorkerProtocol.h).
-    bool Synthesize(const std::string& utf8Text, float rate,
-                    std::vector<float>& outSamples);
+    // Result of reading one frame of the 'S' response stream.
+    enum class FrameStatus { Data, End, Error };
 
-    // Ask the app for the user's current gain (volume multiplier, 1 = unity).
-    // Cheap 'G' round-trip; the engine calls this at each chunk's playback start
-    // so a slider move isn't frozen into already-synthesized samples. Leaves
-    // outGain untouched on failure (caller keeps its last value).
-    bool QueryGain(float& outGain);
+    // Send the whole utterance for synthesis. The app splits it into chunks and
+    // streams the PCM back frame by frame (read with ReadFrame). `rate` is the
+    // host's rate-derived speed multiplier; the app owns the narrator voice and
+    // folds in the user's speed itself (see WorkerProtocol.h). Returns false (and
+    // closes the pipe) if the request can't be written.
+    bool BeginSynth(const std::string& utf8Text, float rate);
 
-    // Ask the app how many sentences to coalesce per steady-state chunk (the
-    // first chunk is always one sentence for a fast start). Cheap 'C' round-trip
-    // the engine issues once per Speak before splitting. Leaves outSentences
-    // untouched on failure (caller keeps its built-in default).
-    bool QueryChunkSentences(uint32_t& outSentences);
+    // Read the next frame of a stream started by BeginSynth. On Data, `outSamples`
+    // holds that chunk's 24 kHz float PCM and `outGain` the user's current volume
+    // (fresh per chunk). End marks a clean finish; Error a failed/broken stream
+    // (the pipe is closed). The engine applies gain × host volume itself.
+    FrameStatus ReadFrame(std::vector<float>& outSamples, float& outGain);
 
     void Close();
 

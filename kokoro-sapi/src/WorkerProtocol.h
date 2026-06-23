@@ -5,39 +5,32 @@
 // Every request starts with a one-byte command:
 //
 //   kCmdSynth ('S'):
-//     -> [float rate][u32 textBytes][utf8 text]
-//     <- [u32 nSamples][float samples...]      (24 kHz mono, [-1, 1])
-//        nSamples == kSynthError signals a synthesis failure.
+//     -> [float rate][u32 textBytes][utf8 text]      (the WHOLE utterance)
+//     <- a STREAM of frames, one per synthesized chunk:
+//          [u32 nSamples][float gain][float samples...]   (24 kHz mono, [-1, 1])
+//        terminated by a marker frame whose leading u32 is:
+//          kStreamEnd  -> the utterance is complete (no gain/samples follow)
+//          kSynthError -> a chunk failed; playback stops (no gain/samples follow)
+//     The host (the kokoro-reader app) now owns ALL chunking: it splits the text
+//     into sentence chunks, synthesizes them with a prefetch pipeline and streams
+//     the PCM back frame by frame. The engine is a pure sink — it pumps each
+//     frame to the SAPI site in ~250 ms blocks and aborts by closing the pipe.
 //     `rate` is the host's rate-derived speed multiplier (1 = the host's normal
-//     rate). The synthesis host (the kokoro-reader app) owns the narrator voice
-//     and the user's speed multiplier — it reads those from its own settings
-//     (webview localStorage) and folds `rate` into the final synthesis speed — so
-//     they're no longer carried on the wire. Gain is NOT applied here; the engine
-//     queries it at playback (kCmdGain) and scales the samples then.
-//
-//   kCmdGain ('G'):
-//     -> (nothing)
-//     <- [float gain]                          (1 = unity; the user's volume)
-//     The engine asks for the current gain when each chunk *starts playing*, so a
-//     volume change lands within the playing chunk instead of being frozen into
-//     already-synthesized/prefetched samples. The host reads "tts-gain" from its
-//     webview localStorage. Unity (1.0) is the safe fallback if it can't answer.
-//
-//   kCmdChunk ('C'):
-//     -> (nothing)
-//     <- [u32 sentences]                       (sentences per steady-state chunk)
-//     The engine asks once per Speak how many sentences to coalesce per chunk
-//     (after the always-1-sentence first chunk, which stays fixed for fast start).
-//     The host reads "tts-chunk" from its webview localStorage; the engine clamps
-//     it and keeps its built-in default if the query fails.
+//     rate). The host owns the narrator voice and folds in the user's own speed
+//     multiplier, so those don't cross the wire. `gain` (the user's volume, 1 =
+//     unity, read from "tts-gain") rides along in each frame — fresh per chunk so
+//     a slider move lands within the playing chunk rather than being frozen into
+//     prefetched samples — and the engine applies it (× the host volume) when it
+//     converts to int16. The per-chunk sentence count ("tts-chunk") is also read
+//     by the host now, so there's no separate config round-trip.
 //
 //   kCmdInfo ('I'):
 //     -> (nothing)
 //     <- [u16 jsonBytes][utf8 json]  e.g. {"provider":"DirectML","voice":"af_heart"}
 //
-// One sentence-sized chunk per synth request; clients handle chunking, abort and
-// rate. The worker stays alive between requests (model stays warm) and exits
-// after kIdleTimeoutMs without a client.
+// The host streams a whole utterance per 'S' request and handles chunking, gain
+// and prefetch; the engine handles abort (by closing the pipe). The worker stays
+// alive between requests (model stays warm) and exits after kIdleTimeoutMs.
 #include <windows.h>
 #include <cstdint>
 
@@ -45,10 +38,11 @@ namespace kokoro_ipc {
 
 constexpr wchar_t kPipeName[]     = L"\\\\.\\pipe\\KokoroSapiSynth";
 constexpr uint8_t kCmdSynth       = 'S';
-constexpr uint8_t kCmdGain        = 'G';
-constexpr uint8_t kCmdChunk       = 'C';
 constexpr uint8_t kCmdInfo        = 'I';
-constexpr uint32_t kSynthError    = 0xFFFFFFFFu;
+// Frame-stream markers for the 'S' response (a leading u32 >= kStreamEnd is a
+// control marker, never a real sample count — that'd be ~16 GB of PCM).
+constexpr uint32_t kStreamEnd     = 0xFFFFFFFEu;  // utterance complete
+constexpr uint32_t kSynthError    = 0xFFFFFFFFu;  // a chunk failed
 constexpr uint32_t kMaxTextBytes  = 1u << 20;   // sanity cap (1 MB)
 constexpr uint32_t kIdleTimeoutMs = 5 * 60 * 1000;
 

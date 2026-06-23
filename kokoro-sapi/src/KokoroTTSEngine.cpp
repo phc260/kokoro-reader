@@ -4,8 +4,6 @@
 #include "Guids.h"
 #include "Log.h"
 #include <cmath>
-#include <cstdint>
-#include <future>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -26,118 +24,6 @@ constexpr int kSampleRate = 24000;
 // g_synthMutex (the app handles one request at a time per connection anyway).
 WorkerClient g_worker;
 std::mutex   g_synthMutex;
-
-// Split text into chunks for sentence-streaming. We ramp up: the FIRST chunk is
-// a single sentence (so audio starts quickly), then chunks coalesce
-// `sentencesPerChunk` sentences each (fewer round-trips / inter-chunk seams;
-// synthesis runs ~3x realtime so it stays ahead of playback). The steady-state
-// count is user-tunable — the app sends it over the pipe ('C'); see Speak.
-// Boundaries are . ! ? (followed by whitespace / a closing quote / end) and
-// newlines; decimals ("3.14") and ellipses are not boundaries. A single sentence
-// that runs past kSoftCap is split at its last clause boundary (comma / semicolon
-// / colon) so a run-on breaks at a natural pause rather than mid-phrase; only if
-// it has no clause boundary at all does it fall back to a word break past
-// kHardCap. The app (kokoro-js) sub-splits anything past its token limit anyway.
-std::vector<std::wstring> SplitText(const std::wstring& text, size_t sentencesPerChunk) {
-    constexpr size_t kFirstSentences = 1;     // small first chunk -> each page starts fast
-    const size_t kSentences = sentencesPerChunk ? sentencesPerChunk : 1;  // 0 would never flush
-    constexpr size_t kSoftCap        = 400;   // over-long sentence: break at a clause (, ; :)
-    constexpr size_t kHardCap        = 2000;  // last resort (no clause found: word boundary)
-    std::vector<std::wstring> chunks;
-    const size_t n = text.size();
-
-    auto isSpace = [](wchar_t c) {
-        return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n' || c == L'\f' || c == L'\v';
-    };
-    auto isDigit = [](wchar_t c) { return c >= L'0' && c <= L'9'; };
-    auto isCloser = [](wchar_t c) {
-        return c == L'"' || c == L'\'' || c == L')' || c == L']' || c == L'}' ||
-               c == L'”' || c == L'’';  // closing curly quotes
-    };
-
-    // `sentenceStart` tracks the in-progress sentence so the length caps below
-    // measure one sentence, not the whole multi-sentence chunk (whose size the
-    // user-set sentence count governs). `lastClause` is the position just after
-    // the most recent comma/semicolon/colon in that sentence — the preferred
-    // split point for an over-long one.
-    size_t start = 0, sentences = 0, sentenceStart = 0, lastClause = 0;
-    auto flush = [&](size_t end) {
-        size_t a = start, b = end;
-        while (a < b && isSpace(text[a])) ++a;
-        while (b > a && isSpace(text[b - 1])) --b;
-        if (b > a) chunks.emplace_back(text.substr(a, b - a));
-        start = end;
-        sentences = 0;
-        sentenceStart = end;
-        lastClause = 0;
-    };
-    auto target = [&]() { return chunks.empty() ? kFirstSentences : kSentences; };
-
-    size_t i = 0;
-    while (i < n) {
-        const wchar_t c = text[i];
-
-        // Find a sentence/paragraph boundary at i; boundaryEnd = position after it.
-        size_t boundaryEnd = 0;
-        if (c == L'\n') {
-            boundaryEnd = i + 1;
-        } else if (c == L'.' || c == L'!' || c == L'?') {
-            bool isBoundary = true;
-            if (c == L'.') {
-                const bool decimal =
-                    i > 0 && isDigit(text[i - 1]) && i + 1 < n && isDigit(text[i + 1]);
-                const bool ellipsis =
-                    (i + 1 < n && text[i + 1] == L'.') || (i > 0 && text[i - 1] == L'.');
-                if (decimal || ellipsis) isBoundary = false;
-            }
-            if (isBoundary) {
-                size_t j = i + 1;  // swallow trailing terminators + closers (?!" or .")
-                while (j < n && (text[j] == L'.' || text[j] == L'!' || text[j] == L'?' ||
-                                 isCloser(text[j])))
-                    ++j;
-                if (j >= n || isSpace(text[j])) boundaryEnd = j;
-            }
-        }
-
-        if (boundaryEnd) {
-            // Count the sentence; emit once we've collected `target()` of them.
-            if (++sentences >= target()) {
-                flush(boundaryEnd);
-                i = start;
-            } else {
-                i = boundaryEnd;
-                sentenceStart = boundaryEnd;  // next sentence begins here
-                lastClause = 0;
-            }
-            continue;
-        }
-
-        // Remember clause boundaries (",", ";", ":" before whitespace / end) as
-        // candidate split points for an over-long sentence.
-        if ((c == L',' || c == L';' || c == L':') &&
-            (i + 1 >= n || isSpace(text[i + 1])))
-            lastClause = i + 1;
-
-        // The current sentence has run long: prefer to break at its last clause
-        // boundary; fall back to a word break only if it has none (kHardCap).
-        if (i - sentenceStart >= kSoftCap && lastClause > sentenceStart) {
-            flush(lastClause);
-            i = start;
-            continue;
-        }
-        if (i - sentenceStart >= kHardCap) {  // no clause break: cut on a word boundary
-            size_t brk = i;
-            while (brk > start && !isSpace(text[brk - 1])) --brk;
-            if (brk <= start) brk = i;  // one long token: hard cut
-            flush(brk);
-            i = start;
-            continue;
-        }
-        ++i;
-    }
-    flush(n);  // trailing text
-    return chunks;
-}
 
 }  // namespace
 
@@ -234,10 +120,13 @@ STDMETHODIMP KokoroTTSEngine::GetOutputFormat(const GUID* /*pTargetFmtId*/,
     return S_OK;
 }
 
-// Render the utterance: concatenate speakable fragments, split into sentence
-// chunks (SplitText; the per-chunk sentence count is fetched from the app), then
-// synthesize each chunk over the pipe and stream the PCM to the host in ~250 ms
-// blocks with abort checks between them.
+// Render the utterance: concatenate the speakable fragments and hand the whole
+// text to the app, which now owns all chunking — it splits into sentence chunks,
+// synthesizes them with a prefetch pipeline and streams the PCM back frame by
+// frame (BeginSynth + ReadFrame). The engine is a pure sink: for each frame it
+// applies the per-chunk gain (carried in the frame) × the host volume and writes
+// ~250 ms blocks to the SAPI site, checking SPVES_ABORT. On stop it closes the
+// pipe to interrupt the in-flight stream; the next Speak reconnects.
 STDMETHODIMP KokoroTTSEngine::Speak(DWORD /*dwSpeakFlags*/, REFGUID /*rguidFormatId*/,
     const WAVEFORMATEX* /*pWaveFormatEx*/, const SPVTEXTFRAG* pTextFragList,
     ISpTTSEngineSite* pOutputSite) {
@@ -261,84 +150,55 @@ STDMETHODIMP KokoroTTSEngine::Speak(DWORD /*dwSpeakFlags*/, REFGUID /*rguidForma
     if (text.empty()) return S_OK;
 
     // The app (its webview localStorage) owns the narrator, the user's speed
-    // multiplier and gain; the engine only forwards the host's live rate slider
-    // and applies its volume slider. Speed/voice/gain no longer cross the pipe.
+    // multiplier, gain and the per-chunk sentence count; the engine only forwards
+    // the host's live rate slider and applies its volume slider. Host SAPI rate
+    // -10..10 -> speed 1/3x..3x (log); the app multiplies this by the user's own
+    // speed setting before synthesizing. Rate is fixed for the whole utterance —
+    // a mid-utterance host rate change takes effect on the next Speak (pages are
+    // short, and the stream can't be re-rated in flight).
     USHORT volume = 100;
     pOutputSite->GetVolume(&volume);
     long rate = 0;
     pOutputSite->GetRate(&rate);
-    // Host SAPI rate -10..10 -> speed 1/3x..3x (log). The app multiplies this by
-    // the user's own speed setting before synthesizing.
-    float speed = std::pow(3.0f, static_cast<float>(rate) / 10.0f);
+    const float speed = std::pow(3.0f, static_cast<float>(rate) / 10.0f);
 
-    // Ask the app how many sentences to coalesce per steady-state chunk (the user
-    // owns this via webview localStorage, "tts-chunk"). The pipe is idle here —
-    // EnsureSynth connected it and no synth is in flight yet — so the 'C' round-
-    // trip is free; we clamp to a sane range and keep the default on failure.
-    uint32_t chunkSentences = 4;
+    const std::string utf8 = Narrow(text);
+
+    // Open the stream (one 'S' request for the whole utterance). One reconnect
+    // retry covers a pipe that went stale between EnsureSynth and here.
     {
         std::lock_guard<std::mutex> lk(g_synthMutex);
-        (void)g_worker.QueryChunkSentences(chunkSentences);
+        if (!g_worker.BeginSynth(utf8, speed) &&
+            !(g_worker.EnsureConnected() && g_worker.BeginSynth(utf8, speed))) {
+            KokoroLog("Speak: BeginSynth failed (app pipe)");
+            return E_FAIL;
+        }
     }
-    chunkSentences = (std::min<uint32_t>)(8, (std::max<uint32_t>)(1, chunkSentences));
 
-    const std::vector<std::wstring> chunks = SplitText(text, chunkSentences);
-    if (chunks.empty()) return S_OK;
     const size_t kBlock = kSampleRate / 4;  // ~250 ms
-
-    // Prefetch pipeline: synthesize the NEXT chunk on a worker thread while the
-    // current one plays, so synthesis time is hidden behind playback and there's
-    // no gap at chunk boundaries (SAPI's own buffering isn't enough). Synthesis
-    // is serialized by g_synthMutex; on stop we close the pipe to interrupt the
-    // in-flight synth, and the next Speak reconnects.
-    auto launch = [&](size_t k, float spd) {
-        return std::async(std::launch::async, [&chunks, k, spd]() {
-            std::vector<float> pcm;
-            const std::string utf8 = Narrow(chunks[k]);
-            std::lock_guard<std::mutex> lk(g_synthMutex);
-            if (!g_worker.Synthesize(utf8, spd, pcm))
-                (void)(g_worker.EnsureConnected() && g_worker.Synthesize(utf8, spd, pcm));
-            return pcm;  // empty on failure
-        });
-    };
-
-    std::future<std::vector<float>> pending = launch(0, speed);
-    float gain = 1.0f;  // user's volume; re-queried per chunk at playback start
     HRESULT result = S_OK;
-    for (size_t k = 0; k < chunks.size(); ++k) {
-        std::vector<float> pcm = pending.get();
+    bool aborted = false;
+    for (;;) {
+        if (pOutputSite->GetActions() & SPVES_ABORT) { aborted = true; break; }
 
-        // Read the user's current gain now, while the pipe is idle (the chunk-k
-        // synth just finished and chunk k+1 isn't launched yet) so the 'G' round-
-        // trip doesn't fight a prefetch synth for the connection. Applying gain
-        // here — not at synth time in the app — means a slider move lands within
-        // the playing chunk instead of being frozen into prefetched samples. We
-        // keep the previous value if the query fails. Serialized like Synthesize.
+        // Pull the next chunk's PCM (+ its fresh gain) off the stream.
+        std::vector<float> pcm;
+        float gain = 1.0f;
+        WorkerClient::FrameStatus st;
         {
             std::lock_guard<std::mutex> lk(g_synthMutex);
-            (void)g_worker.QueryGain(gain);
+            st = g_worker.ReadFrame(pcm, gain);
         }
-
-        // Kick off the next chunk's synthesis before writing this one.
-        if (k + 1 < chunks.size()) {
-            const DWORD a = pOutputSite->GetActions();
-            if (a & SPVES_RATE) {
-                pOutputSite->GetRate(&rate);
-                speed = std::pow(3.0f, static_cast<float>(rate) / 10.0f);
-            }
-            if (a & SPVES_VOLUME) pOutputSite->GetVolume(&volume);
-            pending = launch(k + 1, speed);
-        }
-
-        if (pOutputSite->GetActions() & SPVES_ABORT) break;  // stop between chunks
-        if (pcm.empty()) {                                   // synthesis failed
+        if (st == WorkerClient::FrameStatus::End) break;          // utterance done
+        if (st == WorkerClient::FrameStatus::Error) {             // failed/broken
             KokoroLog("Speak: synthesis failed (app pipe)");
             result = E_FAIL;
             break;
         }
 
-        // float [-1,1] -> int16 with the user's gain (queried above) and the host
-        // volume applied. Clamped below.
+        // float [-1,1] -> int16 with the user's gain (from the frame) and the
+        // host volume applied. Clamped below.
+        if (pOutputSite->GetActions() & SPVES_VOLUME) pOutputSite->GetVolume(&volume);
         const float vol = volume / 100.0f;
         std::vector<short> out(pcm.size());
         for (size_t i = 0; i < pcm.size(); ++i) {
@@ -347,7 +207,6 @@ STDMETHODIMP KokoroTTSEngine::Speak(DWORD /*dwSpeakFlags*/, REFGUID /*rguidForma
             out[i] = static_cast<short>(s * 32767.f);
         }
 
-        bool aborted = false;
         for (size_t off = 0; off < out.size(); off += kBlock) {
             if (pOutputSite->GetActions() & SPVES_ABORT) { aborted = true; break; }
             const size_t n = (std::min)(kBlock, out.size() - off);  // () dodges windows.h min macro
@@ -359,8 +218,9 @@ STDMETHODIMP KokoroTTSEngine::Speak(DWORD /*dwSpeakFlags*/, REFGUID /*rguidForma
         if (aborted) break;
     }
 
-    // If a prefetch is still in flight (we stopped early), interrupt it by
-    // closing the pipe so the future's destructor returns promptly.
-    if (pending.valid()) g_worker.Close();
+    // Stopped early while the app is still streaming: close the pipe to interrupt
+    // it (its next frame write fails and it cancels the rest). Next Speak
+    // reconnects. A clean End/Error leaves the pipe open for reuse.
+    if (aborted) g_worker.Close();
     return result;
 }

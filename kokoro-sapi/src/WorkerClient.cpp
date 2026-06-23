@@ -21,10 +21,8 @@ bool WorkerClient::EnsureConnected() {
     return false;
 }
 
-bool WorkerClient::Synthesize(const std::string& utf8Text, float rate,
-                              std::vector<float>& outSamples) {
+bool WorkerClient::BeginSynth(const std::string& utf8Text, float rate) {
     if (m_pipe == INVALID_HANDLE_VALUE) return false;
-    if (utf8Text.empty()) return true;
     if (utf8Text.size() > kMaxTextBytes) return false;
 
     const uint8_t  cmd       = kCmdSynth;
@@ -32,60 +30,40 @@ bool WorkerClient::Synthesize(const std::string& utf8Text, float rate,
     if (!WriteExact(m_pipe, &cmd, sizeof(cmd)) ||
         !WriteExact(m_pipe, &rate, sizeof(rate)) ||
         !WriteExact(m_pipe, &textBytes, sizeof(textBytes)) ||
-        !WriteExact(m_pipe, utf8Text.data(), textBytes)) {
-        Close();  // broken pipe: next Speak() reconnects/respawns
+        (textBytes && !WriteExact(m_pipe, utf8Text.data(), textBytes))) {
+        Close();  // broken pipe: next Speak() reconnects
         return false;
     }
+    return true;
+}
+
+WorkerClient::FrameStatus WorkerClient::ReadFrame(std::vector<float>& outSamples,
+                                                  float& outGain) {
+    outSamples.clear();
+    if (m_pipe == INVALID_HANDLE_VALUE) return FrameStatus::Error;
 
     uint32_t n = 0;
     if (!ReadExact(m_pipe, &n, sizeof(n))) {
         Close();
-        return false;
+        return FrameStatus::Error;
     }
-    if (n == kSynthError) return false;
+    if (n == kStreamEnd) return FrameStatus::End;
+    if (n == kSynthError) return FrameStatus::Error;  // app keeps the stream open
 
-    const size_t base = outSamples.size();
-    outSamples.resize(base + n);
-    if (n && !ReadExact(m_pipe, outSamples.data() + base, n * sizeof(float))) {
-        outSamples.resize(base);
-        Close();
-        return false;
-    }
-    return true;
-}
-
-bool WorkerClient::QueryGain(float& outGain) {
-    if (m_pipe == INVALID_HANDLE_VALUE) return false;
-
-    const uint8_t cmd = kCmdGain;
-    if (!WriteExact(m_pipe, &cmd, sizeof(cmd))) {
-        Close();
-        return false;
-    }
     float g = 1.0f;
     if (!ReadExact(m_pipe, &g, sizeof(g))) {
         Close();
-        return false;
+        return FrameStatus::Error;
     }
     outGain = g;
-    return true;
-}
 
-bool WorkerClient::QueryChunkSentences(uint32_t& outSentences) {
-    if (m_pipe == INVALID_HANDLE_VALUE) return false;
-
-    const uint8_t cmd = kCmdChunk;
-    if (!WriteExact(m_pipe, &cmd, sizeof(cmd))) {
+    outSamples.resize(n);
+    if (n && !ReadExact(m_pipe, outSamples.data(), n * sizeof(float))) {
+        outSamples.clear();
         Close();
-        return false;
+        return FrameStatus::Error;
     }
-    uint32_t s = 0;
-    if (!ReadExact(m_pipe, &s, sizeof(s))) {
-        Close();
-        return false;
-    }
-    outSentences = s;
-    return true;
+    return FrameStatus::Data;
 }
 
 void WorkerClient::Close() {
