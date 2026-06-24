@@ -1,4 +1,4 @@
-# kokoro-kindle-reader
+# Kokoro Kindle Reader
 
 Local, offline text-to-speech for Windows, powered by
 [Kokoro-82M](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX) running
