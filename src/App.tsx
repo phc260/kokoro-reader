@@ -229,8 +229,8 @@ function App() {
   }
 
   return (
-    <Box sx={{ display: "flex", flexDirection: "column", gap: 2, p: 3 }}>
-      <Box sx={{ display: "flex", justifyContent: "flex-end" }}>
+    <>
+      <Box sx={{ display: "flex", justifyContent: "flex-end", px: 1, pt: 1 }}>
         <Tooltip title="Appearance">
           <IconButton
             aria-label="Appearance"
@@ -293,207 +293,209 @@ function App() {
         </Menu>
       </Box>
 
-      <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-        <Tooltip title="Voice Mode">
-          <GraphicEqIcon fontSize="medium" color="action" />
-        </Tooltip>
-        <ToggleButtonGroup
-          exclusive
-          size="small"
-          color="primary"
-          value={agency}
-          onChange={(_, val) => {
-            if (val !== null) selectAgency(val);
-          }}
-          sx={{
-            "& .MuiToggleButton-root.Mui-selected": {
-              bgcolor: "primary.main",
-              color: "primary.contrastText",
-              "&:hover": { bgcolor: "primary.dark" },
-            },
-          }}
-        >
-          <Tooltip title="Set Kindle's voice to Microsoft David">
-            <ToggleButton value="microsoft">Microsoft</ToggleButton>
+      <Box sx={{ display: "flex", flexDirection: "column", gap: 2, px: 3, pb: 3, pt: 1 }}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+          <Tooltip title="Voice Mode">
+            <GraphicEqIcon fontSize="medium" color="action" />
           </Tooltip>
-          <Tooltip title="Set Kindle's voice to Kokoro">
-            <ToggleButton value="kokoro">Kokoro</ToggleButton>
-          </Tooltip>
-        </ToggleButtonGroup>
-      </Box>
+          <ToggleButtonGroup
+            exclusive
+            size="small"
+            color="primary"
+            value={agency}
+            onChange={(_, val) => {
+              if (val !== null) selectAgency(val);
+            }}
+            sx={{
+              "& .MuiToggleButton-root.Mui-selected": {
+                bgcolor: "primary.main",
+                color: "primary.contrastText",
+                "&:hover": { bgcolor: "primary.dark" },
+              },
+            }}
+          >
+            <Tooltip title="Set Kindle's voice to Microsoft David">
+              <ToggleButton value="microsoft">Microsoft</ToggleButton>
+            </Tooltip>
+            <Tooltip title="Set Kindle's voice to Kokoro">
+              <ToggleButton value="kokoro">Kokoro</ToggleButton>
+            </Tooltip>
+          </ToggleButtonGroup>
+        </Box>
 
-      <Box sx={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 2 }}>
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1, width: 220 }}>
-          <Tooltip title="Narrator">
-            <RecordVoiceOverIcon fontSize="medium" color="action" />
-          </Tooltip>
-          <FormControl size="small" fullWidth>
-            <Select
-              aria-label="Narrator"
-              value={voice}
-              onChange={(e) => {
-                stop(); // halt any in-flight/playing preview of the old voice
-                setVoice(e.target.value);
-              }}
-              disabled={!ready || !kokoro}
-              MenuProps={{ slotProps: { paper: { sx: { maxHeight: 360 } } } }}
-            >
-              {VOICES.flatMap((v, i) => {
-                const items = [];
-                if (i === 0 || v.group !== VOICES[i - 1].group) {
+        <Box sx={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 2 }}>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1, width: 220 }}>
+            <Tooltip title="Narrator">
+              <RecordVoiceOverIcon fontSize="medium" color="action" />
+            </Tooltip>
+            <FormControl size="small" fullWidth>
+              <Select
+                aria-label="Narrator"
+                value={voice}
+                onChange={(e) => {
+                  stop(); // halt any in-flight/playing preview of the old voice
+                  setVoice(e.target.value);
+                }}
+                disabled={!ready || !kokoro}
+                MenuProps={{ slotProps: { paper: { sx: { maxHeight: 360 } } } }}
+              >
+                {VOICES.flatMap((v, i) => {
+                  const items = [];
+                  if (i === 0 || v.group !== VOICES[i - 1].group) {
+                    items.push(
+                      <ListSubheader key={v.group}>{v.group}</ListSubheader>,
+                    );
+                  }
                   items.push(
-                    <ListSubheader key={v.group}>{v.group}</ListSubheader>,
+                    <MenuItem key={v.id} value={v.id}>
+                      {v.name}
+                    </MenuItem>,
                   );
-                }
-                items.push(
-                  <MenuItem key={v.id} value={v.id}>
-                    {v.name}
-                  </MenuItem>,
-                );
-                return items;
-              })}
-            </Select>
-          </FormControl>
-        </Box>
-
-        {busy || playing ? (
-          <ControlButton
-            label={busy ? "Synthesizing…" : "Stop"}
-            onClick={stop}
-            color={busy ? "primary" : "error"}
-          >
-            {busy ? <CircularProgress size={24} color="inherit" /> : <StopIcon />}
-          </ControlButton>
-        ) : (
-          <ControlButton
-            label="Preview"
-            onClick={play}
-            disabled={!ready || !kokoro}
-          >
-            <PlayArrowIcon />
-          </ControlButton>
-        )}
-      </Box>
-
-      <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-          <Tooltip title="Reading speed">
-            <SpeedIcon fontSize="medium" color="action" />
-          </Tooltip>
-          <Box sx={{ width: 220 }}>
-            <Slider
-              size="small"
-              sx={SLIDER_SX}
-              value={speed}
-              min={0.5}
-              max={2}
-              step={0.05}
-              disabled={!kokoro}
-              valueLabelDisplay="auto"
-              valueLabelFormat={(v) => `${Math.round(v * 100)}%`}
-              onChange={(_, v) => setSpeed(v as number)}
-            />
+                  return items;
+                })}
+              </Select>
+            </FormControl>
           </Box>
-        </Box>
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-          <Tooltip title={gain > 0 ? "Mute" : "Unmute"}>
-            <IconButton
-              size="small"
-              onClick={toggleMute}
-              disabled={!kokoro}
-              aria-label={gain > 0 ? "Mute" : "Unmute"}
-              sx={{ p: 0 }}
+
+          {busy || playing ? (
+            <ControlButton
+              label={busy ? "Synthesizing…" : "Stop"}
+              onClick={stop}
+              color={busy ? "primary" : "error"}
             >
-              {gain > 0 ? (
-                <VolumeUpIcon fontSize="medium" color="action" />
-              ) : (
-                <VolumeOffIcon fontSize="medium" color="action" />
-              )}
-            </IconButton>
-          </Tooltip>
-          <Box sx={{ width: 220 }}>
-            <Slider
-              size="small"
-              sx={SLIDER_SX}
-              value={gain}
-              min={0}
-              max={2}
-              step={0.05}
-              disabled={!kokoro}
-              valueLabelDisplay="auto"
-              valueLabelFormat={(v) => `${Math.round(v * 100)}%`}
-              onChange={(_, v) => setGain(v as number)}
-            />
-          </Box>
+              {busy ? <CircularProgress size={24} color="inherit" /> : <StopIcon />}
+            </ControlButton>
+          ) : (
+            <ControlButton
+              label="Preview"
+              onClick={play}
+              disabled={!ready || !kokoro}
+            >
+              <PlayArrowIcon />
+            </ControlButton>
+          )}
         </Box>
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-          <Tooltip title="Sentences per chunk (Kindle streaming): higher is smoother but starts slower">
-            <NotesIcon fontSize="medium" color="action" />
-          </Tooltip>
-          <Box sx={{ width: 220 }}>
-            <Slider
-              size="small"
-              sx={SLIDER_SX}
-              value={chunk}
-              min={1}
-              max={6}
-              step={1}
-              marks
-              disabled={!kokoro}
-              valueLabelDisplay="auto"
-              valueLabelFormat={(v) => `${v}`}
-              onChange={(_, v) => setChunk(v as number)}
-            />
-          </Box>
-        </Box>
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-          <Tooltip title="Pacing lead (ms, Kindle streaming): audio kept buffered ahead — lower = snappier volume changes but riskier gaps/underruns">
-            <TimerIcon fontSize="medium" color="action" />
-          </Tooltip>
-          <Box sx={{ width: 220 }}>
-            <Slider
-              size="small"
-              sx={SLIDER_SX}
-              value={lead}
-              min={50}
-              max={1500}
-              step={50}
-              disabled={!kokoro}
-              valueLabelDisplay="auto"
-              valueLabelFormat={(v) => `${v} ms`}
-              onChange={(_, v) => setLead(v as number)}
-            />
-          </Box>
-        </Box>
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-          <Tooltip title="Sub-frame size (ms, Kindle streaming): how finely gain/volume is re-read — smaller = finer response, more overhead">
-            <GrainIcon fontSize="medium" color="action" />
-          </Tooltip>
-          <Box sx={{ width: 220 }}>
-            <Slider
-              size="small"
-              sx={SLIDER_SX}
-              value={subframe}
-              min={50}
-              max={500}
-              step={25}
-              disabled={!kokoro}
-              valueLabelDisplay="auto"
-              valueLabelFormat={(v) => `${v} ms`}
-              onChange={(_, v) => setSubframe(v as number)}
-            />
-          </Box>
-        </Box>
-      </Box>
 
-      <Typography variant="body2" color={error ? "error" : "text.secondary"}>
-        {error
-          ? error
-          : ready
-            ? `engine: kokoro.js (${backend})`
-            : "loading model…"}
-      </Typography>
-    </Box>
+        <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+            <Tooltip title="Reading speed">
+              <SpeedIcon fontSize="medium" color="action" />
+            </Tooltip>
+            <Box sx={{ width: 220 }}>
+              <Slider
+                size="small"
+                sx={SLIDER_SX}
+                value={speed}
+                min={0.5}
+                max={2}
+                step={0.05}
+                disabled={!kokoro}
+                valueLabelDisplay="auto"
+                valueLabelFormat={(v) => `${Math.round(v * 100)}%`}
+                onChange={(_, v) => setSpeed(v as number)}
+              />
+            </Box>
+          </Box>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+            <Tooltip title={gain > 0 ? "Mute" : "Unmute"}>
+              <IconButton
+                size="small"
+                onClick={toggleMute}
+                disabled={!kokoro}
+                aria-label={gain > 0 ? "Mute" : "Unmute"}
+                sx={{ p: 0 }}
+              >
+                {gain > 0 ? (
+                  <VolumeUpIcon fontSize="medium" color="action" />
+                ) : (
+                  <VolumeOffIcon fontSize="medium" color="action" />
+                )}
+              </IconButton>
+            </Tooltip>
+            <Box sx={{ width: 220 }}>
+              <Slider
+                size="small"
+                sx={SLIDER_SX}
+                value={gain}
+                min={0}
+                max={2}
+                step={0.05}
+                disabled={!kokoro}
+                valueLabelDisplay="auto"
+                valueLabelFormat={(v) => `${Math.round(v * 100)}%`}
+                onChange={(_, v) => setGain(v as number)}
+              />
+            </Box>
+          </Box>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+            <Tooltip title="Sentences per chunk (Kindle streaming): higher is smoother but starts slower">
+              <NotesIcon fontSize="medium" color="action" />
+            </Tooltip>
+            <Box sx={{ width: 220 }}>
+              <Slider
+                size="small"
+                sx={SLIDER_SX}
+                value={chunk}
+                min={1}
+                max={6}
+                step={1}
+                marks
+                disabled={!kokoro}
+                valueLabelDisplay="auto"
+                valueLabelFormat={(v) => `${v}`}
+                onChange={(_, v) => setChunk(v as number)}
+              />
+            </Box>
+          </Box>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+            <Tooltip title="Pacing lead (ms, Kindle streaming): audio kept buffered ahead — lower = snappier volume changes but riskier gaps/underruns">
+              <TimerIcon fontSize="medium" color="action" />
+            </Tooltip>
+            <Box sx={{ width: 220 }}>
+              <Slider
+                size="small"
+                sx={SLIDER_SX}
+                value={lead}
+                min={50}
+                max={1500}
+                step={50}
+                disabled={!kokoro}
+                valueLabelDisplay="auto"
+                valueLabelFormat={(v) => `${v} ms`}
+                onChange={(_, v) => setLead(v as number)}
+              />
+            </Box>
+          </Box>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+            <Tooltip title="Sub-frame size (ms, Kindle streaming): how finely gain/volume is re-read — smaller = finer response, more overhead">
+              <GrainIcon fontSize="medium" color="action" />
+            </Tooltip>
+            <Box sx={{ width: 220 }}>
+              <Slider
+                size="small"
+                sx={SLIDER_SX}
+                value={subframe}
+                min={50}
+                max={500}
+                step={25}
+                disabled={!kokoro}
+                valueLabelDisplay="auto"
+                valueLabelFormat={(v) => `${v} ms`}
+                onChange={(_, v) => setSubframe(v as number)}
+              />
+            </Box>
+          </Box>
+        </Box>
+
+        <Typography variant="body2" color={error ? "error" : "text.secondary"}>
+          {error
+            ? error
+            : ready
+              ? `engine: kokoro.js (${backend})`
+              : "loading model…"}
+        </Typography>
+      </Box>
+    </>
   );
 }
 
